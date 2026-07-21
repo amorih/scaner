@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+results/
+env/
+.venv/
+scanner_results.db
+scanner_results.db-shm
+scanner_results.db-wal
