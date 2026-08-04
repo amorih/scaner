@@ -1,0 +1,1732 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+  <style>
+    /* CSS идёт от общего к частному: токены → каркас окна → элементы страниц
+       → финальная дизайн-система. Последний блок намеренно переопределяет
+       ранние свойства, оставшиеся от первых версий интерфейса. */
+    :root{
+      --bg:#17121f;
+      --bg2:#1e182a;
+      --panel:#241d33;
+      --card:#2b2340;
+      --hover:#352a4d;
+      --border:rgba(255,255,255,.06);
+      --text:#f8f9fb;
+      --muted:#b3b0c8;
+      --purple:#8b5cf6;
+      --violet:#a855f7;
+      --blue:#4f8cff;
+      --green:#2ed573;
+      --warn:#f59e0b;
+      --error:#ef4444;
+      --shadow:0 14px 34px rgba(0,0,0,.20);
+      --console-height:126px;
+    }
+
+    *{box-sizing:border-box}
+    html,body{
+      margin:0;
+      height:100%;
+      overflow:hidden;
+      background:var(--bg);
+      color:var(--text);
+      font:13px Inter,"Segoe UI",sans-serif;
+    }
+    button,input,select{font:inherit}
+    button{cursor:pointer}
+
+    .shell{
+      position:relative;
+      isolation:isolate;
+      height:100vh;
+      display:grid;
+      grid-template-rows:43px 1fr var(--console-height) 24px;
+      grid-template-columns:280px 1fr 285px;
+      background:linear-gradient(180deg,#191320 0%,#17121f 100%);
+    }
+    .shell.console-collapsed{--console-height:31px}
+
+    .app-backdrop{
+      position:absolute;
+      inset:0;
+      overflow:hidden;
+      pointer-events:none;
+      z-index:-1;
+      background:
+        radial-gradient(circle at 36% 28%, rgba(82,39,255,.10), transparent 22%),
+        radial-gradient(circle at 72% 22%, rgba(255,159,252,.07), transparent 18%),
+        radial-gradient(circle at 54% 68%, rgba(132,113,184,.05), transparent 20%),
+        linear-gradient(180deg,#191320 0%,#17121f 100%);
+    }
+    .app-backdrop::before{
+      content:"";
+      position:absolute;
+      inset:0;
+      background:
+        radial-gradient(ellipse 240px 180px at 52% 46%, rgba(255,255,255,.040), rgba(255,255,255,0) 60%),
+        linear-gradient(180deg, rgba(82,39,255,.08), rgba(82,39,255,0) 55%),
+        linear-gradient(180deg, rgba(255,159,252,.05), rgba(255,159,252,0) 60%);
+      opacity:.34;
+    }
+    .app-backdrop::after{
+      content:"";
+      position:absolute;
+      inset:0;
+      background:
+        radial-gradient(circle at 20% 30%, rgba(255,255,255,.018) 0 1px, transparent 1px 100%),
+        radial-gradient(circle at 72% 64%, rgba(255,255,255,.014) 0 1px, transparent 1px 100%);
+      background-size:18px 18px, 24px 24px;
+      opacity:.10;
+    }
+    @keyframes fade{
+      from{opacity:.3;transform:translateY(4px)}
+      to{opacity:1;transform:none}
+    }
+
+    .top{
+      grid-column:1/-1;
+      display:flex;
+      align-items:center;
+      gap:16px;
+      padding:0 15px;
+      background:#1a1524;
+      border-bottom:1px solid var(--border);
+    }
+    .workspaces{display:flex;gap:3px}
+    .workspaces button{
+      border:1px solid transparent;
+      background:transparent;
+      color:#aaa2b8;
+      padding:6px 10px;
+      font-size:11px;
+      transition:.18s ease;
+    }
+    .workspaces button.active,.workspaces button:hover{
+      color:#fff;
+      background:#302341;
+      border-color:rgba(139,92,246,.2);
+    }
+    .top-spacer{flex:1}
+    .top-status{font:10px ui-monospace;color:#837c95}
+
+    .nav{
+      grid-row:2;
+      grid-column:1;
+      padding:14px 10px;
+      border-right:1px solid var(--border);
+      background:#1b1520;
+    }
+    .nav-caption,.eyebrow{
+      font-size:10px;
+      letter-spacing:1.1px;
+      color:#837893;
+      font-weight:700;
+      margin:5px 8px 8px;
+    }
+    .nav-item{
+      width:100%;
+      display:flex;
+      align-items:center;
+      gap:11px;
+      border:0;
+      border-left:2px solid transparent;
+      background:transparent;
+      color:#aaa2b8;
+      padding:10px 12px;
+      text-align:left;
+      transition:.18s ease;
+    }
+    .nav-item:hover{background:#261e32;color:#eee9f7}
+    .nav-item.active{
+      border-left-color:var(--purple);
+      color:#fff;
+      background:linear-gradient(90deg,rgba(139,92,246,.14),transparent);
+    }
+    .nav-divider{height:1px;background:var(--border);margin:12px 6px}
+    .dot{
+      display:inline-block;
+      width:7px;
+      height:7px;
+      border-radius:50%;
+      margin-right:6px;
+      background:#656073;
+    }
+    .dot.ok{background:var(--green)}
+    .dot.fault,.indicator.fault{background:var(--error)}
+
+    main{
+      grid-row:2;
+      grid-column:2;
+      overflow:auto;
+      padding:24px 26px 34px;
+      min-width:0;
+    }
+    .page{display:none;animation:fade .24s ease}
+    .page.active{display:block}
+    .page-head{
+      display:flex;
+      align-items:flex-start;
+      justify-content:space-between;
+      margin-bottom:22px;
+    }
+    .page-head h1{font-size:24px;margin:0 0 5px;letter-spacing:-.5px}
+    .page-head p{margin:0;color:var(--muted)}
+    .toolbar,.actions,.hero-actions{display:flex;gap:8px;flex-wrap:wrap}
+
+    .button{
+      position:relative;
+      overflow:hidden;
+      border:1px solid #5f4d79;
+      background:linear-gradient(180deg,#332744,#2a2037);
+      color:#ece7f5;
+      padding:10px 14px;
+      min-height:40px;
+      border-radius:2px;
+      transition:.18s ease;
+      box-shadow:inset 0 1px 0 rgba(255,255,255,.03);
+    }
+    .button:hover{
+      border-color:#9d82d0;
+      background:linear-gradient(180deg,#3b2c50,#2f243f);
+      transform:translateY(-1px);
+    }
+    .button.primary{
+      border-color:#9e84db;
+      background:linear-gradient(180deg,#7950d3,#6543b2);
+      color:#fff;
+    }
+    .button.primary:hover{
+      background:linear-gradient(180deg,#865de0,#6e4dbe);
+    }
+    .button.connect{
+      min-width:148px;
+      background:linear-gradient(180deg,#3a2a4d,#2d223d);
+      border-color:#71539d;
+    }
+    .button.connect strong{
+      display:block;
+      font-size:12px;
+      font-weight:700;
+      letter-spacing:.2px;
+    }
+    .button.connect span{
+      display:block;
+      margin-top:2px;
+      font-size:10px;
+      color:#c3b7d6;
+    }
+    .button.danger{
+      background:rgba(239,68,68,.08);
+      border-color:rgba(239,68,68,.45);
+      color:#ffc8c8;
+    }
+    .button.danger:hover{
+      background:rgba(239,68,68,.16);
+      border-color:rgba(239,68,68,.52);
+      transform:none;
+    }
+    .button:disabled{opacity:.45;cursor:not-allowed}
+
+    .overview{
+      display:grid;
+      grid-template-columns:repeat(4,minmax(140px,1fr));
+      gap:12px;
+    }
+    .card,.panel{
+      background:rgba(36,29,51,.94);
+      border:1px solid var(--border);
+      box-shadow:var(--shadow);
+    }
+    .card{
+      min-height:126px;
+      padding:16px;
+    }
+    .card-top{
+      display:flex;
+      justify-content:space-between;
+      color:#a9a1b8;
+      font-size:10px;
+      letter-spacing:.8px;
+    }
+    .card-icon{color:#aa8cff}
+    .metric{
+      font-size:24px;
+      font-weight:700;
+      letter-spacing:-.6px;
+      margin-top:23px;
+    }
+    .metric span{font-size:12px;color:var(--muted);font-weight:400}
+    .health{font-size:11px;margin-top:7px;color:#a7a0b1}
+
+    .dashboard-grid{
+      display:grid;
+      grid-template-columns:minmax(420px,1fr) 320px;
+      gap:14px;
+      margin-top:14px;
+    }
+    .panel-head{
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      padding:15px 16px;
+      border-bottom:1px solid var(--border);
+    }
+    .panel h2{font-size:13px;margin:0}
+    .panel small{color:#91889f}
+    .panel-body{padding:16px}
+    .hero{
+      background:
+        linear-gradient(180deg, rgba(45,33,62,.96), rgba(28,20,39,.92)),
+        linear-gradient(90deg, rgba(82,39,255,.18), transparent 44%);
+    }
+    .hero-grid{
+      display:grid;
+      grid-template-columns:1fr;
+      gap:14px;
+      align-items:start;
+    }
+    .hero-preview,.dev-panel{
+      min-height:236px;
+      border:1px solid var(--border);
+      background:linear-gradient(180deg,rgba(24,18,31,.92),rgba(16,12,22,.88));
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      text-align:center;
+      color:#9f93b3;
+    }
+    .hero-preview b,.dev-panel b{display:block;color:#f2eef9;font-size:14px;letter-spacing:.8px}
+    .hero-actions{
+      display:grid;
+      grid-template-columns:repeat(2,minmax(180px,1fr));
+      gap:12px;
+      align-content:flex-start;
+    }
+    .connect-tile{
+      min-height:92px;
+      padding:16px 18px;
+      justify-content:flex-start;
+      text-align:left;
+      border-color:#7f61b2;
+      background:
+        linear-gradient(180deg,rgba(72,53,101,.94),rgba(44,34,59,.96)),
+        radial-gradient(circle at 84% 20%, rgba(255,255,255,.08), transparent 24%);
+      box-shadow:inset 0 1px 0 rgba(255,255,255,.05), 0 10px 24px rgba(0,0,0,.18);
+    }
+    .connect-tile:hover{
+      border-color:#a98be6;
+      background:
+        linear-gradient(180deg,rgba(83,61,118,.96),rgba(50,38,67,.98)),
+        radial-gradient(circle at 84% 20%, rgba(255,255,255,.12), transparent 28%);
+    }
+    .connect-tile strong{
+      display:block;
+      font-size:16px;
+      font-weight:700;
+      letter-spacing:.1px;
+    }
+    .connect-tile span{
+      display:block;
+      margin-top:6px;
+      font-size:11px;
+      color:#cbbce1;
+    }
+    .dev-panel{
+      flex-direction:column;
+      align-items:flex-start;
+      justify-content:flex-end;
+      padding:22px;
+      background:
+        linear-gradient(180deg,rgba(26,20,36,.92),rgba(16,12,22,.94)),
+        radial-gradient(circle at 80% 18%, rgba(139,92,246,.10), transparent 20%);
+    }
+    .dev-panel.clickable{
+      cursor:pointer;
+      transition:.18s ease;
+    }
+    .dev-panel.clickable:hover{
+      border-color:rgba(139,92,246,.28);
+      transform:translateY(-1px);
+    }
+    .dev-panel span{
+      display:block;
+      margin-top:8px;
+      color:#a698bb;
+      font-size:12px;
+    }
+    .dev-panel .dev-tag{
+      display:inline-block;
+      margin-bottom:10px;
+      padding:6px 9px;
+      border:1px solid rgba(139,92,246,.28);
+      color:#cdbdf1;
+      font:10px ui-monospace;
+      letter-spacing:1px;
+      text-transform:uppercase;
+      background:rgba(139,92,246,.08);
+    }
+
+    .indicator{
+      width:9px;
+      height:9px;
+      border-radius:50%;
+      background:#736b7d;
+    }
+    .indicator.connected{background:var(--green)}
+    .device-meta strong{display:block;font-size:12px}
+    .device-meta span{display:block;font:10px ui-monospace;color:#938ba1;margin-top:3px}
+    .device-controls{
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+      margin-top:14px;
+    }
+    .switchline{
+      display:flex;
+      align-items:center;
+      gap:10px;
+      margin-top:14px;
+      padding:12px 14px;
+      border:1px solid rgba(139,92,246,.14);
+      background:rgba(25,19,34,.52);
+      color:#cbbfe0;
+      font-size:11px;
+    }
+    .switchline input{
+      width:16px;
+      height:16px;
+      accent-color:#8b5cf6;
+    }
+    .switchline small{
+      display:block;
+      margin-top:3px;
+      color:#9e91b5;
+    }
+
+    .scan-layout{
+      display:grid;
+      grid-template-columns:1fr 320px;
+      gap:14px;
+    }
+    .scan-brief{padding:15px}
+    .form-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+    .field{display:flex;flex-direction:column;gap:7px}
+    .field label{font-size:11px;color:#b8afc2}
+    .field input,.field select{
+      height:39px;
+      padding:0 10px;
+      color:#eae5f3;
+      background:#1b1422;
+      border:1px solid #493755;
+      outline:0;
+    }
+    .field input:focus,.field select:focus{
+      border-color:#8b5cf6;
+    }
+    .safety{
+      display:flex;
+      align-items:center;
+      gap:8px;
+      margin-top:16px;
+      color:#c7bfd0;
+      font-size:11px;
+    }
+    .progress-wrap{margin-top:18px}
+    .progress-meta{
+      display:flex;
+      justify-content:space-between;
+      color:#aaa0b5;
+      font-size:11px;
+      margin-bottom:7px;
+    }
+    .progress{height:8px;background:#17121e;border:1px solid var(--border)}
+    .progress i{
+      display:block;
+      height:100%;
+      width:0;
+      background:linear-gradient(90deg,#7c52d5,#9d73ff);
+      transition:width .2s ease;
+    }
+    .estimate{padding:18px}
+    .estimate-row{
+      display:flex;
+      justify-content:space-between;
+      padding:12px 0;
+      border-bottom:1px solid var(--border);
+    }
+    .estimate-row span{color:#aaa1b6}
+    .estimate-row b{font:13px ui-monospace}
+
+    .table{
+      width:100%;
+      border-collapse:collapse;
+      font-size:11px;
+    }
+    .table th{
+      text-align:left;
+      color:#9e94ad;
+      font-size:10px;
+      letter-spacing:.7px;
+      background:#21192d;
+    }
+    .table th,.table td{
+      padding:10px;
+      border:1px solid var(--border);
+    }
+    .table tbody tr:hover,.table tbody tr.selected{background:#352a4d}
+    .table td{font-family:ui-monospace;color:#d9d1e2}
+    .empty{padding:35px;color:#8c8396;text-align:center}
+
+    .inspector{
+      grid-row:2;
+      grid-column:3;
+      padding:15px 12px;
+      border-left:1px solid var(--border);
+      background:#1b1520;
+      overflow:auto;
+    }
+    .inspector h3{font-size:11px;letter-spacing:.6px;margin:4px 4px 14px}
+    .property{
+      display:flex;
+      justify-content:space-between;
+      padding:9px 5px;
+      border-bottom:1px solid var(--border);
+      font-size:11px;
+    }
+    .property span{color:#8f879e}
+    .property b{font-family:ui-monospace;font-weight:500}
+    .live-field{
+      margin:12px 0;
+      padding:14px;
+      background:linear-gradient(145deg,#2d2341,#21192f);
+      border:1px solid rgba(139,92,246,.22);
+    }
+    .live-field .field-value{font-size:26px;font-family:ui-monospace;font-weight:700}
+    .axes{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:10px}
+    .axis{padding:8px;background:rgba(0,0,0,.14);font:10px ui-monospace}
+    .axis b{display:block;color:#ded4ef;font-size:12px;margin-top:4px}
+    .map-layout{
+      display:grid;
+      grid-template-columns:minmax(540px,1fr) 320px;
+      gap:14px;
+    }
+    .map-stage-wrap{
+      padding:16px;
+    }
+    .map-stage{
+      position:relative;
+      aspect-ratio:1/1;
+      width:min(100%,760px);
+      border:1px solid rgba(139,92,246,.22);
+      background:
+        radial-gradient(circle at 50% 50%, rgba(139,92,246,.10), transparent 36%),
+        linear-gradient(180deg, rgba(255,255,255,.02), rgba(255,255,255,0)),
+        linear-gradient(90deg, rgba(255,255,255,.05) 1px, transparent 1px),
+        linear-gradient(180deg, rgba(255,255,255,.05) 1px, transparent 1px),
+        #17111f;
+      background-size:auto,auto,10% 10%,10% 10%,auto;
+      overflow:hidden;
+      box-shadow:inset 0 0 0 1px rgba(255,255,255,.02);
+      cursor:crosshair;
+    }
+    .map-axis-label{
+      position:absolute;
+      font:10px ui-monospace;
+      color:#9f94b4;
+      pointer-events:none;
+      letter-spacing:.4px;
+      background:rgba(23,18,31,.78);
+      padding:2px 5px;
+      border:1px solid rgba(255,255,255,.05);
+      z-index:3;
+    }
+    .map-axis-label.top{top:10px;left:50%;transform:translateX(-50%)}
+    .map-axis-label.bottom{bottom:10px;left:50%;transform:translateX(-50%)}
+    .map-axis-label.left{left:10px;top:50%;transform:translateY(-50%)}
+    .map-axis-label.right{right:10px;top:50%;transform:translateY(-50%)}
+    .map-origin{
+      position:absolute;
+      left:var(--origin-x,50%);
+      top:var(--origin-y,50%);
+      transform:translate(-50%,-50%);
+      padding:3px 7px;
+      border:1px solid rgba(139,92,246,.18);
+      background:rgba(23,18,31,.82);
+      color:#efe9ff;
+      font:11px ui-monospace;
+      pointer-events:none;
+      z-index:3;
+    }
+    .map-stage::before,
+    .map-stage::after{
+      content:"";
+      position:absolute;
+      background:rgba(139,92,246,.18);
+      pointer-events:none;
+    }
+    .map-stage::before{
+      left:var(--origin-x,50%);
+      top:0;
+      bottom:0;
+      width:1px;
+    }
+    .map-stage::after{
+      top:var(--origin-y,50%);
+      left:0;
+      right:0;
+      height:1px;
+    }
+    .map-lock{
+      display:none;
+      position:absolute;
+      inset:0;
+      z-index:4;
+      align-items:center;
+      justify-content:center;
+      flex-direction:column;
+      gap:12px;
+      background:rgba(19,14,27,.78);
+      color:#d8cee8;
+      font-size:12px;
+      text-align:center;
+      backdrop-filter:blur(3px);
+    }
+    .map-stage.locked{cursor:not-allowed}
+    .map-stage.locked .map-lock{display:flex}
+    .map-marker{
+      position:absolute;
+      width:16px;
+      height:16px;
+      margin:-8px 0 0 -8px;
+      border-radius:50%;
+      pointer-events:none;
+      transform:translateZ(0);
+      transition:left .18s ease, top .18s ease, box-shadow .18s ease;
+      z-index:2;
+    }
+    .map-boundary{
+      position:absolute;
+      z-index:1;
+      border:1px solid rgba(139,92,246,.58);
+      background:rgba(139,92,246,.028);
+      box-shadow:inset 0 0 42px rgba(139,92,246,.035);
+      pointer-events:none;
+    }
+    .map-marker.current{
+      border:2px solid #4f8cff;
+      background:rgba(79,140,255,.18);
+      box-shadow:0 0 0 5px rgba(79,140,255,.10);
+    }
+    .map-marker.target{
+      border:2px solid #8b5cf6;
+      background:rgba(139,92,246,.16);
+      box-shadow:0 0 0 7px rgba(139,92,246,.08);
+    }
+    .map-legend{
+      display:flex;
+      gap:18px;
+      flex-wrap:wrap;
+      margin-top:14px;
+      color:#b9b0c8;
+      font-size:11px;
+    }
+    .map-legend i{
+      display:inline-block;
+      width:10px;
+      height:10px;
+      border-radius:50%;
+      margin-right:7px;
+      vertical-align:-1px;
+    }
+    .map-legend .current i{background:#4f8cff}
+    .map-legend .target i{background:#8b5cf6}
+    .map-side{
+      padding:18px;
+    }
+    .map-stack{
+      display:grid;
+      gap:14px;
+    }
+    .map-readout{
+      padding:13px 14px;
+      background:rgba(23,18,31,.78);
+      border:1px solid var(--border);
+    }
+    .coord-hero{
+      display:grid;
+      grid-template-columns:1fr 1fr;
+      gap:12px;
+    }
+    .coord-card{
+      padding:14px;
+      border:1px solid rgba(139,92,246,.14);
+      background:
+        linear-gradient(180deg,rgba(36,29,51,.98),rgba(25,19,35,.94)),
+        radial-gradient(circle at 82% 18%, rgba(139,92,246,.08), transparent 30%);
+    }
+    .coord-card small{
+      display:block;
+      color:#9f93b5;
+      font:10px ui-monospace;
+      letter-spacing:1px;
+      margin-bottom:10px;
+    }
+    .coord-big{
+      display:flex;
+      align-items:baseline;
+      gap:8px;
+      margin-bottom:8px;
+    }
+    .coord-big b{
+      font:700 28px/1 "Cascadia Code","Ubuntu Mono",monospace;
+      color:#fbf9ff;
+      letter-spacing:-.6px;
+    }
+    .coord-big span{
+      color:#8f84a6;
+      font:11px ui-monospace;
+    }
+    .coord-sub{
+      color:#b6aec4;
+      font-size:11px;
+    }
+    .map-readout-row{
+      display:flex;
+      justify-content:space-between;
+      padding:8px 0;
+      border-bottom:1px solid rgba(255,255,255,.05);
+      font-size:11px;
+    }
+    .map-readout-row:last-child{border-bottom:0}
+    .map-readout-row span{color:#9e94ad}
+    .map-readout-row b{font:12px ui-monospace;color:#f4f0fb}
+    .map-note{
+      color:#b7aec6;
+      font-size:11px;
+      line-height:1.6;
+    }
+
+    .console{
+      grid-row:3;
+      grid-column:1/-1;
+      position:relative;
+      background:#151019;
+      border-top:1px solid #352841;
+      display:flex;
+      flex-direction:column;
+      min-height:0;
+      overflow:hidden;
+    }
+    .console-resize{
+      position:absolute;
+      top:0;
+      left:0;
+      right:0;
+      height:6px;
+      cursor:row-resize;
+      z-index:2;
+    }
+    .console-head{
+      height:31px;
+      display:flex;
+      align-items:center;
+      gap:10px;
+      padding:0 13px;
+      border-bottom:1px solid var(--border);
+      user-select:none;
+    }
+    .console-head strong{font:10px ui-monospace;letter-spacing:1px;color:#aea4bd}
+    .console-head .spacer{flex:1}
+    .console-body{
+      overflow:auto;
+      padding:7px 13px;
+      font:11px "Cascadia Code","Ubuntu Mono",monospace;
+      color:#a49aad;
+    }
+    .shell.console-collapsed .console-body{display:none}
+    .logline{line-height:1.7}
+    .logline time{color:#655e71;margin-right:8px}
+    .tag{display:inline-block;min-width:55px;font-size:10px}
+    .tag.INFO{color:#85a7ff}
+    .tag.SUCCESS{color:#76df9f}
+    .tag.WARNING{color:#f8bd57}
+    .tag.ERROR{color:#ff8383}
+    .tiny{
+      border:0;
+      background:transparent;
+      color:#9992ab;
+      padding:7px 8px;
+      font-size:11px;
+    }
+    .tiny:hover{color:#f1edfa}
+
+    .status{
+      grid-row:4;
+      grid-column:1/-1;
+      display:flex;
+      align-items:center;
+      gap:16px;
+      padding:0 12px;
+      background:#1d1624;
+      color:#92899f;
+      font:10px ui-monospace;
+    }
+    .status .spacer{flex:1}
+    .status-coords{
+      display:flex;
+      align-items:center;
+      gap:10px;
+      color:#bdb6cb;
+      min-width:324px;
+      padding:2px 10px;
+      height:20px;
+      border:1px solid rgba(139,92,246,.12);
+      background:rgba(28,21,39,.72);
+    }
+    .status-coords em{
+      font-style:normal;
+      color:#8f879e;
+      letter-spacing:1px;
+    }
+    .status-coords b{
+      color:#f7f3ff;
+      font-weight:600;
+      min-width:62px;
+      text-align:right;
+    }
+    /* Chromium по умолчанию рисует на Linux белый скроллбар. Свой вариант
+       остаётся заметным, но не выбивается из тёмной оболочки. */
+    main,.inspector,.console-body,.table-wrap{
+      scrollbar-width:thin;
+      scrollbar-color:#665078 transparent;
+    }
+    main::-webkit-scrollbar,.inspector::-webkit-scrollbar,.console-body::-webkit-scrollbar,.table-wrap::-webkit-scrollbar{width:8px;height:8px}
+    main::-webkit-scrollbar-track,.inspector::-webkit-scrollbar-track,.console-body::-webkit-scrollbar-track,.table-wrap::-webkit-scrollbar-track{background:transparent}
+    main::-webkit-scrollbar-thumb,.inspector::-webkit-scrollbar-thumb,.console-body::-webkit-scrollbar-thumb,.table-wrap::-webkit-scrollbar-thumb{background:#4b3a5c;border:2px solid transparent;background-clip:padding-box;border-radius:8px}
+    main::-webkit-scrollbar-thumb:hover,.inspector::-webkit-scrollbar-thumb:hover,.console-body::-webkit-scrollbar-thumb:hover{background-color:#72588b}
+
+    /* Единый компактный язык интерфейса: спокойные панели, один тип кнопок
+       и акцент только там, где пользователь может действовать. */
+    :root{--radius:4px;--panel-solid:#211a2d;--panel-deep:#1b1525;--line:rgba(202,181,236,.11)}
+    .shell{grid-template-columns:244px minmax(0,1fr) 266px;background:#17121f}
+    .app-backdrop{
+      --pointer-x:52%;--pointer-y:38%;
+      background:
+        radial-gradient(560px 410px at var(--pointer-x) var(--pointer-y),rgba(117,87,173,.11),transparent 66%),
+        radial-gradient(650px 500px at 84% 100%,rgba(91,57,147,.08),transparent 70%),
+        linear-gradient(135deg,#181220 0%,#16111e 52%,#1a1323 100%);
+    }
+    .app-backdrop::before{
+      background:
+        radial-gradient(ellipse 340px 210px at 26% 17%,rgba(255,255,255,.025),transparent 72%),
+        radial-gradient(ellipse 460px 260px at 78% 60%,rgba(192,170,224,.022),transparent 72%);
+      opacity:.82;
+      transform:translate3d(var(--ice-shift-x,0),var(--ice-shift-y,0),0);
+      transition:transform .7s ease-out;
+      will-change:transform;
+    }
+    .app-backdrop::after{display:none}
+    .top{height:43px;gap:12px;padding:0 14px;background:rgba(27,21,37,.95)}
+    .workspaces{gap:1px;height:100%;align-items:stretch}
+    .workspaces button{position:relative;padding:0 11px;border:0;font-size:11px}
+    .workspaces button.active,.workspaces button:hover{background:transparent;border:0;color:#fff}
+    .workspaces button.active::after{content:"";position:absolute;left:10px;right:10px;bottom:0;height:2px;background:var(--purple);box-shadow:0 0 12px rgba(139,92,246,.55)}
+    .top-status{font-size:9px;color:#847a94;letter-spacing:.45px}
+    .nav{padding:16px 8px;background:rgba(24,18,31,.84)}
+    .nav-caption,.eyebrow{font-size:9px;letter-spacing:1.3px;color:#867a98;margin:5px 10px 9px}
+    .nav-item{gap:10px;padding:9px 11px;border-left:2px solid transparent;font-size:12px}
+    .nav-item:hover{background:rgba(255,255,255,.035)}
+    .nav-item.active{background:rgba(139,92,246,.10);box-shadow:inset 12px 0 18px -18px rgba(169,85,247,.9)}
+    main{padding:23px 24px 32px}
+    .page-head{align-items:center;margin-bottom:18px}
+    .page-head h1{font-size:22px;letter-spacing:-.45px;margin:0}
+    .page-head p{display:none}
+    .button{min-height:36px;padding:8px 12px;border-radius:var(--radius);border-color:#4e3c64;background:#2b2239;font-size:12px;box-shadow:none}
+    .button:hover{background:#332842;border-color:#8268a9;transform:none}
+    .button.primary{background:#7650c9;border-color:#9c7de2;box-shadow:0 0 0 1px rgba(255,255,255,.04) inset}
+    .button.primary:hover{background:#835bdd}
+    .button.danger{background:rgba(239,68,68,.07);border-color:rgba(239,68,68,.36);color:#f2b5b8}
+    .overview{gap:10px}.card,.panel{border-color:var(--line);box-shadow:0 9px 25px rgba(0,0,0,.15);background:rgba(33,26,45,.92);border-radius:var(--radius)}
+    .card{min-height:110px;padding:14px}
+    .card-top{font-size:9px;letter-spacing:1px}.metric{font-size:22px;margin-top:19px}.health{margin-top:5px;font-size:10px}
+    .dashboard-grid{grid-template-columns:minmax(390px,1fr) 300px;gap:10px;margin-top:10px}
+    .panel-head{padding:12px 14px;border-bottom-color:var(--line)}.panel h2{font-size:12px;letter-spacing:.15px}.panel small{font-size:10px;color:#837892}.panel-body{padding:14px}
+    .hero{background:rgba(33,26,45,.92)}.hero-actions{gap:10px}.connect-tile{min-height:104px;padding:15px;border-color:#604b80;background:#271e35;box-shadow:none}
+    .connect-tile:hover{background:#2e2440;border-color:#9574c7}.connect-tile strong{font-size:14px}.connect-tile span{font-size:10px;margin-top:5px;color:#b7a9ca}
+    .dev-panel{min-height:154px;padding:16px;background:#1b1524;border-color:var(--line);justify-content:center;align-items:center;text-align:center}
+    .dev-panel:hover{background:#211a2e;border-color:rgba(139,92,246,.42)}.dev-panel .dev-tag{margin-bottom:8px;padding:4px 7px;font-size:9px}.dev-panel b{font-size:13px}.dev-panel span{margin-top:5px;font-size:10px}
+    .manual-mode{display:flex;align-items:center;justify-content:space-between;margin-top:10px;padding:11px 14px;background:rgba(33,26,45,.72);border:1px solid var(--line);font-size:11px;color:#c7bdd6}
+    .manual-mode label{display:flex;align-items:center;gap:9px;cursor:pointer}.manual-mode input{width:15px;height:15px;accent-color:#8b5cf6}
+    .form-grid{gap:11px}.field{gap:6px}.field label{font-size:10px;color:#b6abc4}.field input,.field select{height:36px;background:#191320;border-color:#493756;border-radius:2px;font-size:12px}
+    .scan-layout{gap:10px;grid-template-columns:minmax(0,1fr) 284px}.scan-brief{padding:14px}.estimate{padding:15px}.estimate-row{padding:10px 0;font-size:11px}#modeHint{display:none}
+    .safety{margin-top:13px}.progress-wrap{margin-top:15px}.progress{height:6px}.progress i{background:#8b5cf6}
+    .inspector{padding:16px 11px;background:rgba(24,18,31,.84);border-left-color:var(--line)}.inspector h3{font-size:12px;margin:4px 5px 12px}.live-field{padding:12px;background:#20192c;border-color:rgba(139,92,246,.24)}.live-field .field-value{font-size:23px}.property{padding:8px 5px;font-size:10px}
+    .map-layout{grid-template-columns:minmax(460px,1fr) 276px;gap:10px}.map-stage-wrap{padding:14px}.map-stage{background-color:#17111f;background-size:auto,auto,12.5% 12.5%,12.5% 12.5%,auto}
+    .map-legend{margin-top:10px;font-size:10px}.map-side{padding:14px}.map-stack{gap:10px}
+    .position-pair{display:grid;grid-template-columns:1fr 1fr;border:1px solid var(--line);background:#1a1424}
+    .position-cell{padding:10px;border-right:1px solid var(--line)}.position-cell:last-child{border-right:0}.position-cell small{display:block;margin-bottom:7px;color:#9689aa;font:9px ui-monospace;letter-spacing:1px}.position-values{display:grid;gap:4px;font:9px ui-monospace;color:#9487a5}.position-values span{display:flex;justify-content:space-between;gap:6px}.position-values b{font:700 11px "Cascadia Code","Ubuntu Mono",monospace;color:#f5f1fb}
+
+    /* Вторая, единая дизайн-система. Здесь нет «светящихся карточек»: это
+       измерительный прибор, поэтому глубина создаётся спокойными слоями,
+       а фиолетовый цвет оставлен только для выбора и главного действия. */
+    :root{
+      --bg:#141117;
+      --bg2:#18141c;
+      --panel:#1d1821;
+      --card:#211b25;
+      --hover:#29212e;
+      --text:#f2eff6;
+      --muted:#a9a1b2;
+      --purple:#9b7aed;
+      --violet:#b195ff;
+      --border:rgba(232,222,247,.085);
+      --line:rgba(232,222,247,.09);
+      --shadow:0 10px 28px rgba(0,0,0,.14);
+    }
+    html,body{font-family:Inter,"Noto Sans","Segoe UI",sans-serif;background:var(--bg)}
+    .shell{grid-template-columns:232px minmax(0,1fr) 254px;background:var(--bg)}
+    .app-backdrop{background:radial-gradient(900px 500px at 57% -12%,rgba(113,81,170,.075),transparent 70%),linear-gradient(180deg,#17131a 0%,#141117 68%)}
+    .app-backdrop::before{opacity:.42}
+    .top{background:rgba(22,18,25,.98);border-bottom-color:var(--line);padding:0 18px}
+    .workspaces{gap:12px}.workspaces button{padding:0 5px;color:#8f879b;font-size:11px}.workspaces button.active,.workspaces button:hover{color:#f1edf7}.workspaces button.active::after{left:4px;right:4px;height:2px;box-shadow:none;background:#9b7aed}
+    .top-status{letter-spacing:.75px;color:#756d7f}
+    .nav{background:#17131a;border-right-color:var(--line);padding:16px 8px}.nav-caption{margin:8px 10px 7px;color:#777082}.nav-item{border-left:2px solid transparent;border-radius:2px;color:#aaa2b4;padding:9px 11px}.nav-item:hover{background:#201a24;color:#eee9f2}.nav-item.active{background:#251e2b;color:#fff;border-left-color:#9b7aed;box-shadow:none}
+    main{padding:26px 28px 34px}.page-head{margin-bottom:20px}.page-head h1{font-size:21px;font-weight:650;letter-spacing:-.3px}.toolbar{gap:7px}
+    .button{border-color:#494050;background:#24202a;color:#e9e4ef;border-radius:3px;font-weight:500;min-height:35px;padding:7px 12px}.button:hover{background:#2c2531;border-color:#75657f}.button.primary{background:#8768d5;border-color:#aa91e8;color:#fff}.button.primary:hover{background:#9678e5}.button.danger{background:transparent;border-color:rgba(239,68,68,.5);color:#ffb8bb}
+    .overview{grid-template-columns:repeat(3,minmax(160px,1fr));gap:10px}.card,.panel{background:var(--panel);border-color:var(--line);box-shadow:none;border-radius:4px}.card{min-height:112px;padding:15px}.card-top{font-size:9px;color:#8f879a;letter-spacing:1.05px}.card-icon{color:#a68aef}.metric{margin-top:21px;font-size:21px;font-weight:650}.metric span{font-size:11px}.health{font-size:10px;color:#938b9c}
+    .dashboard-grid{grid-template-columns:minmax(410px,1fr) 276px;gap:10px;margin-top:10px}.panel-head{height:42px;padding:0 14px;border-bottom-color:var(--line)}.panel h2{font-size:12px;font-weight:650}.panel-body{padding:14px}.hero{background:var(--panel)}
+    .hero-actions{gap:8px}.connect-tile{min-height:94px;padding:14px;background:#1a161e;border-color:#403648;box-shadow:none}.connect-tile.primary{background:#1a161e;border-color:#5b4b70}.connect-tile:hover,.connect-tile.primary:hover{background:#241e29;border-color:#9878db}.connect-tile strong{font-size:13px}.connect-tile span{font:10px "Cascadia Code","Ubuntu Mono",monospace;color:#948aa2}
+    .dev-panel{min-height:152px;background:#19151d;border-color:#39303f;box-shadow:inset 0 0 0 1px rgba(255,255,255,.012)}.dev-panel:hover{background:#201a23;border-color:#67547e}.dev-panel .dev-tag{background:transparent;border-color:#51405f;color:#ab91cf}.dev-panel b{font-size:13px;letter-spacing:.2px}.dev-panel span{color:#93899d}
+    .manual-mode{height:44px;margin-top:10px;padding:0 14px;background:#1b1720;border-color:var(--line);color:#aaa2b4}.manual-mode input{accent-color:#9b7aed}
+    .form-grid{gap:10px}.field label{color:#aaa1b1;font-size:10px}.field input,.field select{background:#17131a;border-color:#44384c;color:#eee9f4;border-radius:2px}.field input:focus,.field select:focus{border-color:#9b7aed;box-shadow:0 0 0 2px rgba(155,122,237,.11)}
+    .estimate{background:#1a161e}.estimate-row{border-bottom-color:var(--line)}.estimate-row b{font-size:12px;color:#ede7f5}.progress{background:#161219;border-color:#31293a}.progress i{background:#9372e0}.safety{color:#b8afc0}
+    .inspector{background:#17131a;border-left-color:var(--line);padding:16px 12px}.inspector h3{font-size:12px;font-weight:650}.live-field{background:#1d1821;border-color:#4b3d5b;box-shadow:none}.axes .axis{background:#18141c}.property{border-bottom-color:var(--line);color:#ded7e7}.property span{color:#898192}
+    .map-stage{background-color:#151119;border-color:#463657;box-shadow:none}.map-stage::before,.map-stage::after{background:rgba(177,149,255,.25)}.map-origin{background:#1d1821;border-color:#635078}.map-boundary{border-color:#9b7aed;background:rgba(155,122,237,.025)}.map-axis-label{background:#19151d;color:#aaa1b7;border-color:#31283a}.map-legend{color:#9e95a8}.map-side{background:#1a161e}.position-pair,.map-readout{background:#17131a;border-color:var(--line)}.position-cell{border-right-color:var(--line)}.map-note{color:#92889e}
+    .table th{background:#1b1720;color:#a89eb2}.table th,.table td{border-color:var(--line)}.table tbody tr:hover,.table tbody tr.selected{background:#292130}
+    .console{background:#121015;border-top-color:#31283a}.console-head{border-bottom-color:var(--line)}.console-body{color:#a39aab}.status{background:#17131a;border-top:1px solid var(--line);color:#918899}.status-coords{background:#151119;border-color:#332a3c}
+
+    /* На карте поле — основной инструмент, поэтому оно получает ширину
+       инспектора. Для данных, сканирования и архива трёхколоночный вид
+       остаётся удобнее. */
+    .shell.map-workspace{grid-template-columns:232px minmax(0,1fr)}
+    .shell.map-workspace .inspector{display:none}
+    .shell.map-workspace .map-layout{grid-template-columns:minmax(0,1fr) 246px;gap:12px}
+    .shell.map-workspace .map-stage{width:min(100%,680px);margin:0 auto}
+    .map-readout{padding:8px 12px;background:#1a1424}.map-readout-row{padding:7px 0;font-size:10px}.map-readout-row b{font-size:11px}.map-note{min-height:13px;font-size:10px;color:#8f83a3;line-height:1.3}
+    .table th{background:#1c1627}.table th,.table td{padding:9px;border-color:var(--line)}
+    .console{background:#151019;border-top-color:var(--line)}.console-head{border-bottom-color:var(--line)}.status{background:#1b1524}.status-coords{border-color:var(--line);background:rgba(20,15,28,.5)}
+    @media (max-width:1250px){.shell{grid-template-columns:212px minmax(0,1fr)}.inspector{display:none}.dashboard-grid{grid-template-columns:1fr 270px}.map-layout{grid-template-columns:minmax(400px,1fr) 250px}}
+  </style>
+</head>
+<body>
+<!-- shell — сетка desktop-приложения: рабочие области, боковые панели,
+     консоль и строка статуса. Никаких сетевых ресурсов для отрисовки нет. -->
+<div class="shell">
+  <!-- Лёгкий декоративный слой. Он не перехватывает клики и не использует WebGL. -->
+  <div class="app-backdrop"></div>
+
+  <!-- Верхние вкладки переключают основные рабочие области. -->
+  <header class="top">
+    <div class="workspaces">
+      <button class="active" data-page="dashboard">Рабочая область</button>
+      <button data-page="map">Карта поля</button>
+      <button data-page="scanning">Сканирование</button>
+    </div>
+    <div class="top-spacer"></div>
+    <div class="top-status">ЛАБОРАТОРИЯ / СКАНЕР МАГНИТНОГО ПОЛЯ</div>
+  </header>
+
+  <!-- Левая панель — список инструментов и страниц, доступный на всех вкладках. -->
+  <aside class="nav">
+    <div class="nav-caption">РАБОЧАЯ ОБЛАСТЬ</div>
+    <button class="nav-item active" data-page="dashboard">Обзор</button>
+    <button class="nav-item" data-page="calibration">Калибровка</button>
+    <button class="nav-item" data-page="map">Карта поля</button>
+    <button class="nav-item" data-page="scanning">Сканирование</button>
+    <button class="nav-item" data-page="measurements">Измерения</button>
+    <div class="nav-divider"></div>
+    <div class="nav-caption">ДАННЫЕ</div>
+    <button class="nav-item" data-page="results">Архив</button>
+    <div class="nav-divider"></div>
+    <button class="nav-item" data-page="settings">Настройки</button>
+  </aside>
+
+  <!-- Центральная область хранит все страницы; JavaScript показывает только active. -->
+  <main>
+    <!-- Главная страница: состояние оборудования и два быстрых подключения. -->
+    <section class="page active" id="dashboard">
+      <div class="page-head">
+        <div><h1>Обзор</h1></div>
+        <div class="toolbar">
+          <button class="button" onclick="bridge.home()">Нулевая точка · G28</button>
+          <button class="button" onclick="NexusApp.go('calibration')">Калибровка</button>
+          <button class="button primary" onclick="NexusApp.go('scanning')">Новый скан</button>
+        </div>
+      </div>
+
+      <div class="overview">
+        <div class="card"><div class="card-top">ПРИНТЕР <span class="card-icon">▣</span></div><div class="metric" id="printerMetric">Не подключён</div><div class="health"><span class="dot" id="printerDot"></span><span id="printerHealth">Ожидание подключения</span></div></div>
+        <div class="card"><div class="card-top">MLX90393 <span class="card-icon">◎</span></div><div class="metric" id="sensorMetric">Не подключён</div><div class="health"><span class="dot" id="sensorDot"></span><span id="sensorHealth">I²C адрес 0x0C</span></div></div>
+        <div class="card"><div class="card-top">ТЕКУЩЕЕ |B| <span class="card-icon">⌁</span></div><div class="metric"><span id="dashB">—</span> <span>µT</span></div><div class="health">Текущее измерение</div></div>
+      </div>
+
+      <div class="dashboard-grid">
+        <div class="panel hero">
+          <div class="panel-head"><h2>Подключения</h2></div>
+          <div class="panel-body">
+            <div class="hero-actions">
+              <button class="button connect-tile primary" onclick="bridge.connectPrinter()"><strong>Принтер</strong><span>/dev/ttyUSB0 · serial</span></button>
+              <button class="button connect-tile" onclick="bridge.connectSensor()"><strong>Датчик</strong><span>MLX90393 · I²C</span></button>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel dev-panel clickable" onclick="NexusApp.go('map')">
+          <div class="dev-tag">НАВИГАЦИЯ</div>
+          <b>Карта поля</b>
+          <span>Клик по рабочей зоне → перемещение принтера</span>
+        </div>
+      </div>
+      <div class="manual-mode"><span>Ручное позиционирование</span><label><input id="ignoreSensor" type="checkbox" onchange="NexusApp.toggleSensorIgnore()"> Без датчика</label></div>
+    </section>
+
+    <!-- Калибровка запоминает фоновое поле датчика перед сканированием. -->
+    <section class="page" id="calibration">
+      <div class="page-head">
+        <div><h1>Калибровка</h1></div>
+        <button class="button primary" onclick="bridge.calibrate()">Сохранить ноль</button>
+      </div>
+      <div class="overview" style="grid-template-columns:minmax(0,1fr)">
+        <div class="panel">
+          <div class="panel-head"><h2>Текущее поле</h2></div>
+          <div class="panel-body">
+            <div class="live-field" style="margin:0">
+              <div class="eyebrow">МОДУЛЬ |B|</div>
+              <div class="field-value" id="calB">— µT</div>
+              <div class="axes">
+                <div class="axis">Bx<b id="calBx">—</b></div>
+                <div class="axis">By<b id="calBy">—</b></div>
+                <div class="axis">Bz<b id="calBz">—</b></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Форма сканирования меняет видимые поля в зависимости от формы объекта. -->
+    <section class="page" id="scanning">
+      <div class="page-head">
+        <div><h1>Сканирование</h1><p id="scanSubtitle">Змейка</p></div>
+        <div class="toolbar">
+          <button class="button" onclick="bridge.home()">Домой · G28</button>
+          <button class="button" onclick="bridge.cancelScan()">Остановить</button>
+          <button class="button danger" onclick="bridge.emergencyStop()">Аварийный стоп</button>
+        </div>
+      </div>
+
+      <div class="scan-layout">
+        <div class="panel">
+          <div class="panel-head"><h2>Параметры</h2><small>мм</small></div>
+          <div class="scan-brief">
+            <div class="form-grid">
+              <div class="field">
+                <label>Тип объекта</label>
+                <select id="shape" onchange="NexusApp.shapeChanged()">
+                  <option value="cylinder">Цилиндрический магнит</option>
+                  <option value="rectangle">Прямоугольный магнит</option>
+                  <option value="system">Магнитная система</option>
+                </select>
+              </div>
+              <div class="field" id="modeField">
+                <label>Режим сканирования</label>
+                <select id="mode" onchange="NexusApp.modeChanged()">
+                  <option value="snake">Змейка — площадь</option>
+                  <option value="circle">Окружность — контур</option>
+                </select>
+              </div>
+              <div class="field" id="diameterField">
+                <label>Диаметр</label>
+                <input id="sizeX" type="number" min="1" value="15" step="0.5" oninput="NexusApp.estimate()">
+              </div>
+              <div class="field" id="rectXField">
+                <label>Размер X</label>
+                <input id="rectX" type="number" min="1" value="20" step="0.5" oninput="NexusApp.estimate()">
+              </div>
+              <div class="field" id="rectYField">
+                <label>Размер Y</label>
+                <input id="rectY" type="number" min="1" value="10" step="0.5" oninput="NexusApp.estimate()">
+              </div>
+              <div class="field" id="startXField">
+                <label>Начало X</label>
+                <input id="startX" type="number" value="-10" step="0.5" oninput="NexusApp.estimate()">
+              </div>
+              <div class="field" id="startYField">
+                <label>Начало Y</label>
+                <input id="startY" type="number" value="0" step="0.5" oninput="NexusApp.estimate()">
+              </div>
+              <div class="field" id="endXField">
+                <label>Конец X</label>
+                <input id="endX" type="number" value="10" step="0.5" oninput="NexusApp.estimate()">
+              </div>
+              <div class="field" id="endYField">
+                <label>Конец Y</label>
+                <input id="endY" type="number" value="0" step="0.5" oninput="NexusApp.estimate()">
+              </div>
+              <div class="field">
+                <label>Высота</label>
+                <input id="height" type="number" min="1" value="5" step="0.5" oninput="NexusApp.estimate()">
+              </div>
+              <div class="field">
+                <label>Шаг</label>
+                <input id="step" type="number" min="0.1" value="5" step="0.5" oninput="NexusApp.estimate()">
+              </div>
+            </div>
+
+            <div class="safety">
+              <input type="checkbox" id="safe" onchange="NexusApp.safety()">
+              <label for="safe">Траектория проверена</label>
+            </div>
+
+            <div class="progress-wrap">
+              <div class="progress-meta"><span id="progressText">Готов к запуску</span><span id="progressPct">0%</span></div>
+              <div class="progress"><i id="progressBar"></i></div>
+            </div>
+
+            <div class="actions">
+              <button class="button primary" id="startBtn" disabled onclick="NexusApp.startScan()">Начать сканирование</button>
+              <button class="button" onclick="bridge.cancelScan()">Остановить без аварии</button>
+            </div>
+          </div>
+        </div>
+
+        <aside class="panel estimate">
+          <div class="eyebrow">ОЦЕНКА</div>
+          <div class="estimate-row"><span>Точек</span><b id="pointEstimate">—</b></div>
+          <div class="estimate-row"><span>Время</span><b id="timeEstimate">—</b></div>
+          <div class="estimate-row"><span>Рабочий Z</span><b id="zEstimate">10.0 мм</b></div>
+          <div class="estimate-row"><span>Траектория</span><b id="modeEstimate">Змейка</b></div>
+          <p id="modeHint" style="font-size:10px;color:var(--muted);margin-top:18px">Змейка</p>
+        </aside>
+      </div>
+    </section>
+
+    <!-- Отдельный экран крупных мгновенных значений магнитного поля. -->
+    <section class="page" id="measurements">
+      <div class="page-head"><div><h1>Измерения</h1></div></div>
+      <div class="overview">
+        <div class="card"><div class="card-top">Bx</div><div class="metric" id="mBx">— <span>µT</span></div></div>
+        <div class="card"><div class="card-top">By</div><div class="metric" id="mBy">— <span>µT</span></div></div>
+        <div class="card"><div class="card-top">Bz</div><div class="metric" id="mBz">— <span>µT</span></div></div>
+        <div class="card"><div class="card-top">|B|</div><div class="metric" id="mB">— <span>µT</span></div></div>
+      </div>
+    </section>
+
+    <!-- Карта использует координаты датчика относительно центра, а не сопла. -->
+    <section class="page" id="map">
+      <div class="page-head">
+        <div><h1>Карта поля</h1></div>
+        <div class="toolbar">
+          <button class="button" onclick="bridge.home()">Домой · G28</button>
+          <button class="button" onclick="bridge.motorsOn()">Моторы · M17</button>
+          <button class="button" onclick="bridge.motorsOff()">Освободить · M84</button>
+        </div>
+      </div>
+
+      <div class="map-layout">
+        <div class="panel">
+          <div class="panel-head"><h2>Рабочая зона</h2><small>клик — перемещение</small></div>
+          <div class="map-stage-wrap">
+            <div class="map-stage" id="mapStage" onclick="NexusApp.mapClick(event)">
+              <div class="map-lock" id="mapLock">Карта заблокирована<button class="button primary" onclick="event.stopPropagation();bridge.home()">Калибровать принтер · G28</button></div>
+              <div class="map-axis-label top" id="mapLabelTop">Y +90</div>
+              <div class="map-axis-label bottom" id="mapLabelBottom">Y −90</div>
+              <div class="map-axis-label left" id="mapLabelLeft">X −96</div>
+              <div class="map-axis-label right" id="mapLabelRight">X +96</div>
+              <div class="map-origin">0, 0</div>
+              <div class="map-boundary" id="mapBoundary"></div>
+              <div class="map-marker current" id="mapCurrent"></div>
+              <div class="map-marker target" id="mapTarget"></div>
+            </div>
+            <div class="map-legend">
+              <span class="current"><i></i>Текущее</span>
+              <span class="target"><i></i>Цель</span>
+              <span id="mapBounds">Область</span>
+            </div>
+          </div>
+        </div>
+
+        <aside class="panel map-side">
+          <div class="eyebrow">ПОЗИЦИОНИРОВАНИЕ · ЦЕНТР 0,0</div>
+          <div class="map-stack">
+            <div class="position-pair">
+              <div class="position-cell">
+                <small>ТЕКУЩЕЕ</small>
+                <div class="position-values"><span>X <b id="mapCurrentX">+0.00</b></span><span>Y <b id="mapCurrentY">+0.00</b></span><span>Z <b id="mapCurrentZ">—</b></span></div>
+              </div>
+              <div class="position-cell">
+                <small>ЦЕЛЬ</small>
+                <div class="position-values"><span>X <b id="mapTargetX">+0.00</b></span><span>Y <b id="mapTargetY">+0.00</b></span><span>Z <b id="mapTargetZ">5.00</b></span></div>
+              </div>
+            </div>
+            <div class="field">
+              <label>Высота Z</label>
+              <input id="mapZ" type="number" min="0" value="5" step="0.5">
+            </div>
+            <button class="button primary" onclick="NexusApp.moveToTarget()">Переместить в целевую точку</button>
+            <div class="map-note" id="mapModeHint">Датчик обязателен</div>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <!-- Архив читает SQLite через методы Bridge.archive() и Bridge.points(). -->
+    <section class="page" id="results">
+      <div class="page-head"><div><h1>Архив</h1></div><button class="button" onclick="NexusApp.loadArchive()">Обновить</button></div>
+      <div class="panel">
+        <table class="table">
+          <thead><tr><th>Дата</th><th>Форма</th><th>Размер</th><th>Шаг</th><th>Точек</th><th>CSV</th></tr></thead>
+          <tbody id="scanRows"><tr><td colspan="6" class="empty">Загрузка…</td></tr></tbody>
+        </table>
+      </div>
+      <div class="panel" style="margin-top:14px">
+        <div class="panel-head"><h2>Точки</h2><small id="pointCaption">Выберите скан</small></div>
+        <div style="max-height:330px;overflow:auto">
+          <table class="table">
+            <thead><tr><th>#</th><th>X</th><th>Y</th><th>Z</th><th>Bx</th><th>By</th><th>Bz</th><th>|B|</th></tr></thead>
+            <tbody id="pointRows"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- Настройки показывают значения config.py; редактирование выполняется в коде. -->
+    <section class="page" id="settings">
+      <div class="page-head"><div><h1>Настройки</h1></div></div>
+      <div class="panel">
+        <div class="scan-brief">
+          <div class="form-grid">
+            <div class="field"><label>Порт принтера</label><input value="/dev/ttyUSB0" disabled></div>
+            <div class="field"><label>Адрес датчика</label><input value="0x0C" disabled></div>
+            <div class="field"><label>Тема</label><input value="Dark / Studio" disabled></div>
+            <div class="field"><label>Версия</label><input value="2.0" disabled></div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Правый инспектор всегда показывает живое поле и состояние операции. -->
+  <aside class="inspector">
+    <div class="eyebrow">ЖИВЫЕ ДАННЫЕ</div>
+    <h3>Магнитное поле</h3>
+    <div class="live-field">
+      <div class="eyebrow">МОДУЛЬ |B|</div>
+      <div class="field-value"><span id="sideB">—</span> <small>µT</small></div>
+      <div class="axes">
+        <div class="axis">Bx<b id="sideBx">—</b></div>
+        <div class="axis">By<b id="sideBy">—</b></div>
+        <div class="axis">Bz<b id="sideBz">—</b></div>
+      </div>
+    </div>
+    <div class="eyebrow">СОСТОЯНИЕ</div>
+    <div class="property"><span>Раздел</span><b id="toolName">Обзор</b></div>
+    <div class="property"><span>Координаты</span><b id="coords">X —  Y —  Z —</b></div>
+    <div class="property"><span>Скан</span><b id="scanState">Готов</b></div>
+    <div class="property"><span>Точки</span><b id="sidePoints">—</b></div>
+  </aside>
+
+  <!-- Консоль принимает события Python и ограничена 500 строками в JavaScript. -->
+  <section class="console">
+    <div class="console-resize" onmousedown="NexusApp.beginConsoleResize(event)"></div>
+    <div class="console-head" ondblclick="NexusApp.toggleConsole()"><strong>КОНСОЛЬ</strong><button class="tiny" onclick="NexusApp.clearLog()">Очистить</button><button class="tiny" id="consoleToggle" onclick="NexusApp.toggleConsole()">Свернуть</button><div class="spacer"></div><span class="top-status">PYTHON BACKEND</span></div>
+    <div class="console-body" id="console"><div class="logline"><time>00:00:00</time><span class="tag.INFO">INFO</span>Интерфейс загружен</div></div>
+  </section>
+
+  <!-- Нижняя строка показывает последнее известное состояние без открытия панели. -->
+  <footer class="status"><span><i class="dot" id="statusPrinter"></i>Принтер <b id="statusPrinterText">нет связи</b></span><span><i class="dot" id="statusSensor"></i>MLX90393 <b id="statusSensorText">нет связи</b></span><span class="status-coords" id="statusCoords"><em>ДАТЧИК</em><span>X <b id="coordX">+0.00</b></span><span>Y <b id="coordY">+0.00</b></span><span>Z <b id="coordZ">0.00</b></span></span><div class="spacer"></div><span id="statusField">|B| — µT</span><span>v2.0.0</span></footer>
+</div>
+
+<script>
+// bridge появится после QWebChannel: через него UI вызывает Python-слоты.
+let bridge=null, selectedPoints=[], selectedScan=null, currentPosition={x:null,y:null,z:null};
+// appState хранит только представление UI. Источник реальной позиции — M114,
+// источник смещений и границ — config.py, переданный Bridge.configuration().
+const appState={
+  printerConnected:false,
+  sensorConnected:false,
+  printerHomed:false,
+  ignoreSensor:false,
+  bedX:220,
+  bedY:220,
+  centerX:110,
+  centerY:110,
+  sensorOffsetX:14,
+  sensorOffsetY:-20,
+  // Значения ниже — безопасные стартовые до ответа Python. Затем их заменяет
+  // `applyHardwareConfig()` данными из config.py.
+  mapMinX:-96,mapMaxX:124,mapMinY:-130,mapMaxY:90,mapViewExtent:130,
+  targetRelX:0,
+  targetRelY:0
+};
+const $=id=>document.getElementById(id), n=v=>Number(v||0), fmt=v=>Number(v||0).toFixed(2), sgn=v=>(v>=0?'+':'')+fmt(v);
+const clamp=(value,min,max)=>Math.max(min,Math.min(max,value));
+
+window.NexusApp={
+  // Единственная точка входа для событий Python: desktop_app.py вызывает её
+  // через runJavaScript с именем события и JSON-совместимыми данными.
+  receive(event,data){
+    if(event==='log')this.log(data.level,data.message);
+    if(event==='status')this.status(data);
+    if(event==='measurement')this.measurement(data);
+    if(event==='position')this.position(data);
+    if(event==='progress')this.progress(data);
+    if(event==='scanFinished'){
+      this.log('SUCCESS','CSV и архив сохранены: '+data.filename);
+      $('scanState').textContent='Готово';
+      $('progressText').textContent='Сканирование завершено';
+      $('startBtn').disabled=!$('safe').checked;
+      this.loadArchive();
+      this.go('results');
+    }
+    if(event==='scanFailed'){
+      let cancelled=/отмен/i.test(data.message);
+      this.log(cancelled?'WARNING':'ERROR',data.message);
+      $('scanState').textContent=cancelled?'Остановлено':'Ошибка';
+      $('progressText').textContent=cancelled?'Сканирование остановлено':'Ошибка сканирования';
+      $('startBtn').disabled=!$('safe').checked;
+    }
+    if(event==='navigate')this.go(data.page);
+  },
+
+  go(page){
+    // Переключаем видимость страниц и одновременно подсвечиваем все элементы
+    // навигации, у которых data-page совпадает с открываемой страницей.
+    document.querySelectorAll('.page').forEach(p=>p.classList.toggle('active',p.id===page));
+    document.querySelectorAll('[data-page]').forEach(b=>b.classList.toggle('active',b.dataset.page===page));
+    document.querySelector('.shell').classList.toggle('map-workspace',page==='map');
+    // Карта требует максимальной высоты. Консоль остаётся доступной по кнопке,
+    // но при входе в рабочую карту не закрывает нижнюю часть сетки.
+    if(page==='map') this.toggleConsole(true);
+    $('toolName').textContent=({dashboard:'Обзор',calibration:'Калибровка',map:'Карта поля',scanning:'Сканирование',measurements:'Измерения',results:'Архив',settings:'Настройки'})[page]||'Раздел';
+    if(page==='map') this.renderMap();
+    if(page==='results')this.loadArchive();
+  },
+
+  status(d){
+    // Статус устройства меняет карточки, нижнюю строку и флаги доступа карты.
+    let on=d.connected,fault=!on&&d.text.startsWith('Ошибка'),cap=d.device==='printer'?'Принтер':'MLX90393',statusKey=d.device==='printer'?'Printer':'Sensor';
+    if(d.device==='printer'){
+      appState.printerConnected=on;
+      appState.printerHomed=on && /откалиброван/i.test(d.text);
+    }
+    if(d.device==='sensor') appState.sensorConnected=on;
+    ['','2'].forEach(s=>{let i=$(d.device+'Indicator'+s);if(i){i.classList.toggle('connected',on);i.classList.toggle('fault',fault);}});
+    let metric=$(d.device+'Metric'); if(metric) metric.textContent=on?'Готов':fault?'Ошибка':'Не подключён';
+    let health=$(d.device+'Health'); if(health) health.textContent=d.text;
+    let text=$(d.device+'Text'); if(text) text.textContent=d.text;
+    let name=$(d.device+'Name'); if(name) name.textContent=cap+' '+(on?'подключён':fault?'недоступен':'не подключён');
+    let dot=$(d.device+'Dot'); if(dot){dot.classList.toggle('ok',on);dot.classList.toggle('fault',fault);}
+    $('status'+statusKey).classList.toggle('ok',on);
+    $('status'+statusKey).classList.toggle('fault',fault);
+    $('status'+statusKey+'Text').textContent=on?'готов':fault?'ошибка I²C':'не подключён';
+  },
+
+  measurement(v){
+    // Одно измерение обновляет все дубли значений: видимый сейчас экран
+    // и постоянный inspector. Значения приходят от MagneticSensor.measure().
+    let b=fmt(v.b);
+    [['Bx',v.bx],['By',v.by],['Bz',v.bz]].forEach(([a,x])=>{
+      ['side','cal','m'].forEach(pre=>{let el=$(pre+a);if(el)el.textContent=fmt(x)+(pre==='m'?' µT':'');});
+    });
+    ['sideB','calB','dashB','mB'].forEach(id=>{let e=$(id);if(e)e.textContent=b+(id==='mB'?' µT':'');});
+    $('statusField').textContent='|B| '+b+' µT';
+  },
+
+  progress(d){
+    // scan() вызывает progress_callback после каждой точки; здесь только
+    // отображение процента и известной позиции, без нового запроса M114.
+    let pct=d.total?d.point/d.total*100:0;
+    $('progressBar').style.width=pct+'%';
+    $('progressText').textContent='Точка '+d.point+' / '+d.total;
+    $('progressPct').textContent=pct.toFixed(0)+'%';
+    $('scanState').textContent='Сканирование';
+    $('sidePoints').textContent=d.point+' / '+d.total;
+    this.position({x:d.value.printer_x,y:d.value.printer_y,z:d.value.z});
+  },
+
+  printerToSensorRelative(printerX,printerY){
+    // Обратная формула из scanner.sensor_to_printer(): переводим абсолютное
+    // положение сопла в положение датчика относительно центра стола.
+    return {
+      x: printerX + appState.sensorOffsetX - appState.centerX,
+      y: printerY + appState.sensorOffsetY - appState.centerY,
+    };
+  },
+
+  sensorRelativeToPrinter(relativeX,relativeY){
+    // Эту формулу используем перед G1: клик по карте всегда относится к датчику.
+    return {
+      x: appState.centerX + relativeX - appState.sensorOffsetX,
+      y: appState.centerY + relativeY - appState.sensorOffsetY,
+    };
+  },
+
+  applyHardwareConfig(config){
+    // Конфигурация приходит из config.py, поэтому изменение SENSOR_OFFSET
+    // автоматически перестраивает и рамку карты, и расчёт координат.
+    appState.bedX=n(config.bed_x);
+    appState.bedY=n(config.bed_y);
+    appState.centerX=appState.bedX/2;
+    appState.centerY=appState.bedY/2;
+    appState.sensorOffsetX=n(config.sensor_offset_x);
+    appState.sensorOffsetY=n(config.sensor_offset_y);
+    // Доступный диапазон датчика = границы сопла + физическое смещение.
+    appState.mapMinX=appState.sensorOffsetX-appState.centerX;
+    appState.mapMaxX=appState.bedX+appState.sensorOffsetX-appState.centerX;
+    appState.mapMinY=appState.sensorOffsetY-appState.centerY;
+    appState.mapMaxY=appState.bedY+appState.sensorOffsetY-appState.centerY;
+    // Общая симметричная шкала держит 0,0 визуально в центре карты.
+    let farthest=Math.max(Math.abs(appState.mapMinX),Math.abs(appState.mapMaxX),Math.abs(appState.mapMinY),Math.abs(appState.mapMaxY));
+    appState.mapViewExtent=Math.ceil(farthest/10)*10;
+    if($('map').classList.contains('active')) this.renderMap();
+  },
+
+  position(v){
+    // M114 и завершение ручного движения передают абсолютные X/Y/Z принтера.
+    currentPosition={x:n(v.x),y:n(v.y),z:n(v.z)};
+    let sensor=this.printerToSensorRelative(currentPosition.x,currentPosition.y);
+    $('coordX').textContent=sgn(sensor.x);
+    $('coordY').textContent=sgn(sensor.y);
+    $('coordZ').textContent=fmt(currentPosition.z);
+    $('coords').textContent='X '+sgn(sensor.x)+'  Y '+sgn(sensor.y)+'  Z '+fmt(currentPosition.z);
+    $('mapCurrentX').textContent=sgn(sensor.x);
+    $('mapCurrentY').textContent=sgn(sensor.y);
+    $('mapCurrentZ').textContent=fmt(currentPosition.z);
+    // Скрытая страница карты не требует обновления маркеров и геометрии.
+    if($('map').classList.contains('active')) this.renderMap();
+  },
+
+  log(level,message){
+    // Создаём одну безопасную DOM-строку лога, затем ограничиваем историю.
+    let c=$('console'),line=document.createElement('div'),time=new Date().toLocaleTimeString('ru-RU');
+    line.className='logline';
+    line.innerHTML='<time>'+time+'</time><span class="tag '+level+'">'+level+'</span>'+message;
+    c.appendChild(line);
+    // Консоль остаётся быстрой даже после многочасовой работы: старые записи
+    // уже есть в терминале запуска, а в DOM держим только свежую историю.
+    while(c.children.length>500)c.removeChild(c.firstChild);
+    c.scrollTop=c.scrollHeight;
+  },
+
+  clearLog(){$('console').innerHTML='';},
+
+  toggleSensorIgnore(){
+    // Флаг разрешает только ручное позиционирование без MLX90393; сканирование
+    // всё равно требует работающий датчик и проверяется в Python.
+    appState.ignoreSensor=$('ignoreSensor').checked;
+    $('mapModeHint').textContent=appState.ignoreSensor
+      ?'Ручной режим без датчика'
+      :'Датчик обязателен';
+  },
+
+  canManualMove(){
+    // Клиентская проверка даёт быстрый ответ пользователю. Те же критические
+    // проверки продублированы в HardwareWorker.manual_move() для безопасности.
+    if(!appState.printerConnected){
+      this.log('WARNING','Подключите принтер перед ручным позиционированием');
+      return false;
+    }
+    if(!appState.printerHomed){
+      this.log('WARNING','Сначала выполните калибровку принтера G28');
+      return false;
+    }
+    if(!appState.sensorConnected && !appState.ignoreSensor){
+      this.log('WARNING','Датчик не подключён. Включите режим игнорирования на главной странице.');
+      return false;
+    }
+    return true;
+  },
+
+  renderMap(){
+    // Пересчитываем только визуальные координаты маркеров и границу стола.
+    let current=$('mapCurrent'),target=$('mapTarget');
+    if(!current || !target) return;
+    $('mapStage').classList.toggle('locked',!appState.printerHomed);
+    let currentSensor=this.printerToSensorRelative(
+      currentPosition.x==null?0:currentPosition.x,
+      currentPosition.y==null?0:currentPosition.y
+    );
+    let view=appState.mapViewExtent;
+    let toLeft=value=>(value+view)/(view*2)*100;
+    let toTop=value=>(view-value)/(view*2)*100;
+    current.style.left=clamp(toLeft(currentSensor.x),0,100)+'%';
+    current.style.top=clamp(toTop(currentSensor.y),0,100)+'%';
+    target.style.left=clamp(toLeft(appState.targetRelX),0,100)+'%';
+    target.style.top=clamp(toTop(appState.targetRelY),0,100)+'%';
+    let boundary=$('mapBoundary');
+    boundary.style.left=toLeft(appState.mapMinX).toFixed(3)+'%';
+    boundary.style.right=(100-toLeft(appState.mapMaxX)).toFixed(3)+'%';
+    boundary.style.top=toTop(appState.mapMaxY).toFixed(3)+'%';
+    boundary.style.bottom=(100-toTop(appState.mapMinY)).toFixed(3)+'%';
+    $('mapStage').style.setProperty('--origin-x','50%');
+    $('mapStage').style.setProperty('--origin-y','50%');
+    $('mapTargetX').textContent=sgn(appState.targetRelX);
+    $('mapTargetY').textContent=sgn(appState.targetRelY);
+    $('mapLabelTop').textContent='Y +'+view;
+    $('mapLabelBottom').textContent='Y −'+view;
+    $('mapLabelLeft').textContent='X −'+view;
+    $('mapLabelRight').textContent='X +'+view;
+    $('mapBounds').textContent='Область: X '+sgn(appState.mapMinX)+'…'+sgn(appState.mapMaxX)+' · Y '+sgn(appState.mapMinY)+'…'+sgn(appState.mapMaxY);
+    let mapZField=$('mapZ');
+    $('mapTargetZ').textContent=fmt(n(mapZField ? mapZField.value : 5));
+  },
+
+  mapClick(event){
+    // Переводим пиксель клика в миллиметры симметричной шкалы карты.
+    let stage=$('mapStage');
+    let rect=stage.getBoundingClientRect();
+    let relX=-appState.mapViewExtent+(event.clientX-rect.left)/rect.width*(appState.mapViewExtent*2);
+    let relY=appState.mapViewExtent-(event.clientY-rect.top)/rect.height*(appState.mapViewExtent*2);
+    if(relX<appState.mapMinX || relX>appState.mapMaxX || relY<appState.mapMinY || relY>appState.mapMaxY){
+      $('mapModeHint').textContent='Вне рабочей зоны';
+      return;
+    }
+    appState.targetRelX=relX;
+    appState.targetRelY=relY;
+    this.renderMap();
+    this.moveToTarget();
+  },
+
+  moveToTarget(){
+    // Собираем абсолютные координаты принтера и передаём их JSON-строкой в Qt.
+    if(!bridge || !this.canManualMove()) return;
+    let absolute=this.sensorRelativeToPrinter(appState.targetRelX,appState.targetRelY);
+    let payload={
+      x:Math.max(0,Math.min(appState.bedX,absolute.x)),
+      y:Math.max(0,Math.min(appState.bedY,absolute.y)),
+      z:Math.max(0,n($('mapZ').value)),
+    };
+    $('scanState').textContent='Перемещение';
+    $('mapTargetZ').textContent=fmt(payload.z);
+    bridge.moveAxes(JSON.stringify(payload));
+  },
+
+  toggleConsole(forceState){
+    // Состояние консоли хранится CSS-классом; высота меняется без пересоздания UI.
+    let shell=document.querySelector('.shell');
+    let collapsed=typeof forceState==='boolean' ? forceState : !shell.classList.contains('console-collapsed');
+    shell.classList.toggle('console-collapsed',collapsed);
+    $('consoleToggle').textContent=collapsed?'Развернуть':'Свернуть';
+  },
+
+  beginConsoleResize(event){
+    // Перетаскивание меняет только CSS-переменную, поэтому не нагружает layout.
+    let shell=document.querySelector('.shell');
+    if(shell.classList.contains('console-collapsed')) return;
+    event.preventDefault();
+    let startY=event.clientY;
+    let startHeight=parseFloat(getComputedStyle(shell).getPropertyValue('--console-height'))||178;
+    let onMove=e=>{
+      let next=Math.max(110,Math.min(360,startHeight+(startY-e.clientY)));
+      shell.style.setProperty('--console-height',next+'px');
+    };
+    let onUp=()=>{
+      window.removeEventListener('mousemove',onMove);
+      window.removeEventListener('mouseup',onUp);
+    };
+    window.addEventListener('mousemove',onMove);
+    window.addEventListener('mouseup',onUp);
+  },
+
+  shapeChanged(){
+    // Выбор формы определяет, какие параметры имеют физический смысл и видимы.
+    let shape=$('shape').value;
+    let isCylinder=shape==='cylinder';
+    let isRectangle=shape==='rectangle';
+    let isSystem=shape==='system';
+
+    $('modeField').style.display=isCylinder?'flex':'none';
+    $('diameterField').style.display=isCylinder?'flex':'none';
+    $('rectXField').style.display=isRectangle?'flex':'none';
+    $('rectYField').style.display=isRectangle?'flex':'none';
+    ['startXField','startYField','endXField','endYField'].forEach(id=>$(id).style.display=isSystem?'flex':'none');
+
+    if(isSystem){
+      $('scanSubtitle').textContent='Линейное сканирование магнитной системы между заданными координатами.';
+      $('modeEstimate').textContent='Прямая';
+      $('modeHint').textContent='Измерение идёт по прямой от начальной до конечной координаты.';
+    }else if(isRectangle){
+      $('scanSubtitle').textContent='Площадной скан прямоугольного магнита по траектории-змейке.';
+      $('modeEstimate').textContent='Змейка';
+      $('modeHint').textContent='Сетка покрывает прямоугольную область магнита.';
+    }else{
+      this.modeChanged();
+    }
+    this.estimate();
+  },
+
+  modeChanged(){
+    // Режим окружности доступен только цилиндру; остальные формы имеют путь
+    // змейкой либо линией, который выбирается автоматически.
+    if($('shape').value!=='cylinder'){this.shapeChanged();return;}
+    let circle=$('mode').value==='circle';
+    $('scanSubtitle').textContent=circle?'Контурное сканирование по окружности цилиндрического магнита.':'Площадной скан цилиндрического магнита по траектории-змейке.';
+    $('modeEstimate').textContent=circle?'Окружность':'Змейка';
+    $('modeHint').textContent=circle?'Точки расположены по окружности на границе заданного диаметра.':'Сетка покрывает площадь цилиндрического магнита; центр включён в измерения.';
+    this.estimate();
+  },
+
+  estimate(){
+    // Быстрая оценка повторяет геометрию scanner.py только для интерфейса;
+    // окончательную безопасную траекторию всегда строит Python.
+    let shape=$('shape').value, step=Math.max(.1,n($('step').value)), count=0, sizeX=0, sizeY=0;
+    if(shape==='system'){
+      count=Math.max(2,Math.ceil(Math.hypot(n($('endX').value)-n($('startX').value),n($('endY').value)-n($('startY').value))/step)+1);
+      $('modeEstimate').textContent='Прямая';
+      $('modeHint').textContent='Измерение идёт по прямой от начальной до конечной координаты.';
+    }else{
+      if(shape==='rectangle'){
+        sizeX=Math.max(1,n($('rectX').value));
+        sizeY=Math.max(1,n($('rectY').value));
+        let divX=Math.ceil(sizeX/step), divY=Math.ceil(sizeY/step);
+        if(divX%2)divX++;
+        if(divY%2)divY++;
+        count=(divX+1)*(divY+1);
+        $('modeEstimate').textContent='Змейка';
+        $('modeHint').textContent='Сетка покрывает прямоугольную область магнита.';
+      }else{
+        sizeX=Math.max(1,n($('sizeX').value));
+        if($('mode').value==='circle'){
+          count=Math.max(8,Math.ceil(Math.PI*sizeX/step));
+          $('modeEstimate').textContent='Окружность';
+          $('modeHint').textContent='Точки расположены по окружности на границе заданного диаметра.';
+        }else{
+          let div=Math.ceil(sizeX/step);
+          if(div%2)div++;
+          count=0;
+          for(let iy=0;iy<=div;iy++)for(let ix=0;ix<=div;ix++){
+            let px=-sizeX/2+ix*sizeX/div,py=-sizeX/2+iy*sizeX/div;
+            if(Math.hypot(px,py)<=sizeX/2+1e-7)count++;
+          }
+          $('modeEstimate').textContent='Змейка';
+          $('modeHint').textContent='Сетка покрывает площадь цилиндрического магнита; центр включён в измерения.';
+        }
+      }
+    }
+    $('pointEstimate').textContent=count;
+    $('timeEstimate').textContent=Math.ceil(count*.75)+' с';
+    $('zEstimate').textContent=(n($('height').value)+5).toFixed(1)+' мм';
+  },
+
+  safety(){$('startBtn').disabled=!$('safe').checked;},
+
+  startScan(){
+    // Преобразуем форму интерфейса в единый словарь параметров scanner.scan().
+    let shape=$('shape').value;
+    let mode='snake', sizeX=0, sizeY=0;
+    if(shape==='system'){
+      mode='line';
+      sizeX=Math.hypot(n($('endX').value)-n($('startX').value),n($('endY').value)-n($('startY').value));
+      sizeY=0;
+    }else if(shape==='rectangle'){
+      mode='snake';
+      sizeX=Math.max(1,n($('rectX').value));
+      sizeY=Math.max(1,n($('rectY').value));
+    }else{
+      mode=$('mode').value;
+      sizeX=Math.max(1,n($('sizeX').value));
+      sizeY=sizeX;
+    }
+    let p={
+      shape,mode,size_x:sizeX,size_y:sizeY,
+      height:n($('height').value),
+      step:Math.max(.1,n($('step').value)),
+      start_x:n($('startX').value),
+      start_y:n($('startY').value),
+      end_x:n($('endX').value),
+      end_y:n($('endY').value)
+    };
+    $('startBtn').disabled=true;
+    $('scanState').textContent='Подготовка';
+    $('progressText').textContent='Подготовка траектории';
+    $('progressPct').textContent='0%';
+    $('progressBar').style.width='0%';
+    bridge.startScan(JSON.stringify(p));
+  },
+
+  loadArchive(){
+    // QWebChannel возвращает JSON строкой: SQLite остаётся в Python-потоке.
+    bridge.archive(raw=>{
+      let scans=JSON.parse(raw), body=$('scanRows');
+      body.innerHTML='';
+      if(!scans.length){
+        body.innerHTML='<tr><td colspan="6" class="empty">Архив пока пуст</td></tr>';
+        return;
+      }
+      scans.forEach(s=>{
+        let tr=document.createElement('tr');
+        let shapeLabel=s.shape==='cylinder'?'Цилиндр':s.shape==='rectangle'?'Прямоугольник':'Система';
+        let size=s.shape==='cylinder'
+          ?'Ø '+s.size_x.toFixed(1)+' мм'
+          :s.shape==='rectangle'
+          ?s.size_x.toFixed(1)+' × '+s.size_y.toFixed(1)+' мм'
+          :'Линия '+s.size_x.toFixed(1)+' мм';
+        tr.innerHTML='<td>'+s.created_at.replace('T',' ')+'</td><td>'+shapeLabel+'</td><td>'+size+'</td><td>'+s.step.toFixed(2)+' мм</td><td>'+s.point_count+'</td><td>'+s.filename+'</td>';
+        tr.onclick=()=>this.selectScan(s,tr);
+        body.appendChild(tr);
+      });
+      this.selectScan(scans[0],body.firstChild);
+    });
+  },
+
+  selectScan(s,row){
+    // Подсвечиваем выбранный скан и запрашиваем только его точки из SQLite.
+    document.querySelectorAll('#scanRows tr').forEach(x=>x.classList.remove('selected'));
+    row.classList.add('selected');
+    selectedScan=s;
+    bridge.points(s.id,raw=>{
+      selectedPoints=JSON.parse(raw);
+      $('pointCaption').textContent=selectedPoints.length+' точек · '+s.filename;
+      let body=$('pointRows');
+      body.innerHTML=selectedPoints.map(p=>'<tr><td>'+p.point_no+'</td><td>'+fmt(p.x)+'</td><td>'+fmt(p.y)+'</td><td>'+fmt(p.z)+'</td><td>'+fmt(p.bx)+'</td><td>'+fmt(p.by)+'</td><td>'+fmt(p.bz)+'</td><td>'+fmt(p.b)+'</td></tr>').join('');
+    });
+  }
+};
+
+// Qt добавляет объект `qt`; QWebChannel получает из него зарегистрированный
+// Python Bridge и выполняет стартовую синхронизацию конфигурации/архива.
+new QWebChannel(qt.webChannelTransport,channel=>{
+  bridge=channel.objects.bridge;
+  NexusApp.shapeChanged();
+  NexusApp.loadArchive();
+  NexusApp.toggleSensorIgnore();
+  bridge.configuration(raw=>NexusApp.applyHardwareConfig(JSON.parse(raw)));
+  NexusApp.renderMap();
+  NexusApp.log('INFO','Мост Python Qt подключён');
+});
+// Все кнопки с data-page используют один обработчик, поэтому новая вкладка
+// добавляется в HTML без отдельного JavaScript-кода.
+document.querySelectorAll('[data-page]').forEach(b=>b.addEventListener('click',()=>NexusApp.go(b.dataset.page)));
+// Изменение высоты меняет только подпись целевой точки, не двигая принтер.
+$('mapZ').addEventListener('input',()=>NexusApp.renderMap());
+
+/* Фон реагирует на курсор с редким обновлением CSS-переменных. Это даёт
+   эффект глубины без canvas, WebGL и постоянного перерисовывания интерфейса. */
+let backdropTick=0;
+document.addEventListener('pointermove',event=>{
+  if(performance.now()-backdropTick<180)return;
+  backdropTick=performance.now();
+  let x=((event.clientX/window.innerWidth)-.5)*12;
+  let y=((event.clientY/window.innerHeight)-.5)*8;
+  let backdrop=document.querySelector('.app-backdrop');
+  backdrop.style.setProperty('--ice-shift-x',x.toFixed(1)+'px');
+  backdrop.style.setProperty('--ice-shift-y',y.toFixed(1)+'px');
+},{passive:true});
+</script>
+</body>
+</html>

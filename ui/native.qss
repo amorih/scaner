@@ -1,0 +1,18 @@
+/* Этот QSS применяется только к нативной рамке Qt. Основной интерфейс
+   оформлен отдельно в studio.html, чтобы WebEngine не смешивал стили. */
+
+/* Корневой QWidget закрывает фон за QWebEngineView и нативной шапкой. */
+#nativeRoot { background: #17121F; }
+
+/* Фиксированная высота нужна frameless-окну: TitleBar в desktop_app.py
+   сам обрабатывает перетаскивание вместо системной рамки Ubuntu. */
+#titlebar { min-height: 37px; max-height: 37px; background: #1E182A; border-bottom: 1px solid #312943; }
+
+/* #brand — неактивная кнопка с SVG-значком и названием приложения. */
+#brand { border: 0; background: transparent; color: #d6c9ed; font-family: Inter, "Segoe UI"; font-size: 11px; font-weight: 700; letter-spacing: 1px; }
+
+/* Общий стиль кнопок свернуть / развернуть / закрыть в TitleBar. */
+#windowControl { background: transparent; border: 0; color: #B3B0C8; min-width: 30px; min-height: 30px; font-size: 16px; }
+
+/* Подсветка сообщает о наведении, но не меняет расположение кнопки. */
+#windowControl:hover { background: #352A4D; color: #F8F9FB; }

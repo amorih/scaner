@@ -1,0 +1,7 @@
+<!-- Локальный векторный знак: ромб обозначает рабочую область, оси и точка
+     внутри — положение датчика. SVG не требует сети и остаётся чётким на HiDPI. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" fill="none">
+  <path d="M24 3 42 24 24 45 6 24 24 3Z" fill="#8B5CF6" fill-opacity=".16" stroke="#B89AFF" stroke-width="2"/>
+  <path d="M24 11v26M11 24h26" stroke="#F8F9FB" stroke-opacity=".9" stroke-width="2"/>
+  <circle cx="24" cy="24" r="5" fill="#A855F7"/>
+</svg>

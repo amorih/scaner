@@ -1,3 +1,6 @@
+# Драйвер конкретного трёхосевого магнитометра MLX90393.
 adafruit-circuitpython-mlx90393==2.4.2
+# Открывает выбранную I²C-шину Linux для драйвера Adafruit.
 adafruit-extended-bus==1.0.2
-PySide6-Essentials>=6.8,<7
+# Qt-оболочка и Qt WebEngine для HTML/CSS/JavaScript интерфейса.
+PySide6>=6.8,<7

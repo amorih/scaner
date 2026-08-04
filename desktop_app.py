@@ -1,33 +1,62 @@
-"""Responsive desktop application for the magnetic-field scanner."""
+"""Главный запуск desktop-приложения NEXUS Studio.
 
-from __future__ import annotations
+Здесь нет формул магнитного поля и G-code: модуль связывает готовые модули
+оборудования с HTML-интерфейсом через Qt WebEngine и QWebChannel.
+"""
 
+from __future__ import annotations  # Разрешает использовать типы классов до их объявления.
+
+# json превращает словари Python в безопасные данные для JavaScript и обратно.
+import json
+# sys передаёт Qt аргументы запуска и возвращает код завершения приложения.
 import sys
+# Path формирует абсолютный путь к локальным файлам UI рядом с этим модулем.
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
-from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFrame, QGridLayout,
-    QHBoxLayout, QHeaderView, QLabel, QMainWindow, QProgressBar, QPushButton,
-    QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
-)
+# Базовые объекты Qt: сигналы, поток, таймер, URL и флаги окна.
+from PySide6.QtCore import QObject, QPoint, QSize, QThread, QTimer, QUrl, Signal, Slot, Qt
+# QWebChannel публикует объект Bridge в JavaScript как `bridge`.
+from PySide6.QtWebChannel import QWebChannel
+# Настройки и виджет встроенного Chromium-движка для HTML-интерфейса.
+from PySide6.QtWebEngineCore import QWebEngineSettings
+from PySide6.QtWebEngineWidgets import QWebEngineView
+# Нативные Qt-виджеты нужны только для оболочки, шапки и размещения WebEngine.
+from PySide6.QtGui import QIcon
+from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QMainWindow, QPushButton, QVBoxLayout, QWidget
 
-from config import PRINTER_BAUDRATE, PRINTER_PORT, PROJECT_NAME, PROJECT_VERSION
+# Настройки оборудования, общие для GUI и остальных Python-модулей.
+from config import (
+    BED_SIZE_X,
+    BED_SIZE_Y,
+    MOVE_SPEED,
+    PRINTER_BAUDRATE,
+    PRINTER_PORT,
+    PROJECT_NAME,
+    PROJECT_VERSION,
+    SCAN_HEIGHT,
+    SENSOR_OFFSET_X,
+    SENSOR_OFFSET_Y,
+    Z_SPEED,
+)
+# Экспорт CSV и классы физического оборудования.
 from csv_export import save
 from printer import Printer
-from scanner import ScanCancelled, scan
+from scanner import ScanCancelled, scan, sensor_to_printer
 from sensor import MagneticSensor
+# SQLite-функции для страницы архива в HTML.
 from storage import get_points, list_scans, save_scan
 
 
 class HardwareWorker(QObject):
-    """All serial, I²C and long scan operations run outside the UI thread."""
-
-    log = Signal(str)
-    printer_state = Signal(bool, str)
-    sensor_state = Signal(bool, str)
+    """Фоновый поток для I²C и serial: GUI здесь никогда не блокируется."""
+    # Сигналы не меняют HTML сами. Они передаются StudioWindow в GUI-поток.
+    log = Signal(str, str)
+    status = Signal(str, bool, str)
     measurement = Signal(dict)
-    scan_progress = Signal(int, int, dict)
+    position = Signal(dict)
+    read_done = Signal()
+    position_done = Signal()
+    progress = Signal(int, int, dict)
     scan_finished = Signal(str)
     scan_failed = Signal(str)
 
@@ -36,139 +65,444 @@ class HardwareWorker(QObject):
         self.printer: Printer | None = None
         self.sensor: MagneticSensor | None = None
         self.cancel_requested = False
+        self.scanning = False
+        # До G28 прошивка не знает абсолютную точку отсчёта. Это состояние
+        # защищает карту и ручные перемещения от случайного движения.
+        self.printer_homed = False
+        # Флаг отделяет немедленный M112 от безопасного M999. Во время скана
+        # поток может быть занят ожиданием ответа на G-code, поэтому M999
+        # нельзя посылать одновременно с ним.
+        self.awaiting_emergency_recovery = False
+        # Последние известные координаты головки принтера в абсолютной системе
+        # координат Marlin. Интерфейс отображает именно их внизу окна.
+        self.current_position = {"x": 0.0, "y": 0.0, "z": 0.0}
 
     @Slot()
     def connect_printer(self) -> None:
+        """Создаёт объект Printer один раз и публикует его состояние в UI."""
         if self.printer:
-            self.printer_state.emit(True, "Подключен")
+            state = "откалиброван" if self.printer_homed else "подключён"
+            self.status.emit("printer", True, f"{PRINTER_PORT} · {state}")
+            self.position.emit(dict(self.current_position))
             return
         try:
             self.printer = Printer(PRINTER_PORT, PRINTER_BAUDRATE)
-            self.printer_state.emit(True, f"{PRINTER_PORT} · подключен")
-            self.log.emit("Принтер подключен. Координаты не изменялись.")
+            self.printer_homed = False
+            self.status.emit("printer", True, f"{PRINTER_PORT} · готов")
+            self.position.emit(dict(self.current_position))
+            self.log.emit("SUCCESS", "Последовательное соединение с принтером установлено")
         except Exception as error:
-            self.printer_state.emit(False, "Не подключен")
-            self.log.emit(f"Ошибка принтера: {error}")
+            self.printer_homed = False
+            self.status.emit("printer", False, "Не подключён")
+            self.log.emit("ERROR", f"Принтер: {error}")
 
     @Slot()
     def connect_sensor(self) -> None:
+        """Создаёт объект MagneticSensor один раз и проверяет I²C-связь."""
         if self.sensor:
-            self.sensor_state.emit(True, "Подключен")
+            self.status.emit("sensor", True, "MLX90393 · подключён")
             return
         try:
             self.sensor = MagneticSensor()
-            self.sensor_state.emit(True, "MLX90393 · подключен")
-            self.log.emit("Датчик MLX90393 подключен.")
+            self.status.emit("sensor", True, "MLX90393 · готов")
+            self.log.emit("SUCCESS", "Датчик MLX90393 инициализирован")
         except Exception as error:
-            self.sensor_state.emit(False, "Не подключен")
-            self.log.emit(f"Ошибка датчика: {error}")
+            self.status.emit("sensor", False, "Не подключён")
+            self.log.emit("ERROR", f"MLX90393: {error}")
 
     @Slot()
     def home(self) -> None:
-        if not self._printer_ready():
+        """Вызывает G28 только после успешного подключения принтера."""
+        if not self.printer:
+            self.log.emit("WARNING", "Перед поиском дома подключите принтер")
             return
         try:
-            self.log.emit("Выполняется G28.")
+            self.log.emit("INFO", "Запущен поиск домашнего положения G28")
             self.printer.home()
-            self.log.emit("Принтер в домашнем положении.")
+            self.printer_homed = True
+            self.current_position = {"x": 0.0, "y": 0.0, "z": 0.0}
+            self.position.emit(dict(self.current_position))
+            self.status.emit("printer", True, f"{PRINTER_PORT} · откалиброван")
+            self.log.emit("SUCCESS", "Принтер в домашнем положении")
         except Exception as error:
-            self.log.emit(f"Ошибка G28: {error}")
+            self.log.emit("ERROR", f"G28: {error}")
 
     @Slot()
     def motors_off(self) -> None:
-        if not self._printer_ready():
-            return
-        try:
+        """Передаёт M84: снимает удерживающий ток, но не меняет координаты."""
+        if self.printer:
             self.printer.motors_off()
-            self.log.emit("Двигатели отключены (M84).")
-        except Exception as error:
-            self.log.emit(f"Ошибка M84: {error}")
+            self.log.emit("INFO", "Двигатели отключены: M84")
 
     @Slot()
-    def calibrate_sensor(self) -> None:
-        if not self._sensor_ready():
+    def motors_on(self) -> None:
+        """Передаёт M17: включает удержание осей, но не запускает движение."""
+        if self.printer:
+            self.printer.motors_on()
+            self.log.emit("INFO", "Двигатели включены: M17")
+
+    @Slot(dict)
+    def manual_move(self, target: dict) -> None:
+        """Ручное перемещение принтера в абсолютные координаты из HTML-карты.
+
+        Интерфейс передаёт X/Y/Z в системе координат самого принтера, а не
+        координаты центра магнита. Это делает карту прямой и понятной:
+        клик в рабочей зоне сразу означает точку стола.
+        """
+        if not self.printer:
+            self.log.emit("WARNING", "Сначала подключите принтер")
+            return
+        if self.scanning:
+            self.log.emit("WARNING", "Во время сканирования ручное перемещение отключено")
+            return
+        if not self.printer_homed:
+            self.log.emit("WARNING", "Перед ручным перемещением выполните G28")
+            return
+        try:
+            x = float(target["x"])
+            y = float(target["y"])
+            z = float(target["z"])
+        except (TypeError, ValueError, KeyError):
+            self.log.emit("ERROR", "Неверные координаты ручного перемещения")
+            return
+
+        if not 0.0 <= x <= BED_SIZE_X:
+            self.log.emit("ERROR", f"X={x:.2f} вне стола 0…{BED_SIZE_X:.0f} мм")
+            return
+        if not 0.0 <= y <= BED_SIZE_Y:
+            self.log.emit("ERROR", f"Y={y:.2f} вне стола 0…{BED_SIZE_Y:.0f} мм")
+            return
+        if z < 0.0:
+            self.log.emit("ERROR", "Z не может быть меньше 0 мм")
+            return
+
+        try:
+            # Сначала поднимаем/опускаем Z, затем двигаем XY. Так безопаснее
+            # для датчика и объекта на столе при ручном позиционировании.
+            self.printer.send("G90")
+            self.printer.move(z=z, speed=Z_SPEED)
+            self.printer.move(x=x, y=y, speed=MOVE_SPEED)
+            self.current_position = {"x": x, "y": y, "z": z}
+            self.position.emit(dict(self.current_position))
+            self.log.emit("SUCCESS", f"Перемещение к X{x:.2f} Y{y:.2f} Z{z:.2f}")
+        except Exception as error:
+            self.log.emit("ERROR", f"Перемещение: {error}")
+
+    @Slot()
+    def cancel_scan(self) -> None:
+        """Обычная отмена сканирования без ввода принтера в emergency state."""
+        self.cancel_requested = True
+        if self.printer:
+            self.printer.cancel_motion()
+        self.log.emit("WARNING", "Запрошена остановка текущего сканирования")
+
+    @Slot()
+    def calibrate(self) -> None:
+        """Сохраняет текущий магнитный фон в MagneticSensor.zero()."""
+        if not self.sensor:
+            self.log.emit("WARNING", "Перед калибровкой подключите MLX90393")
             return
         try:
             self.sensor.zero()
-            self.log.emit("Нулевая точка датчика сохранена.")
+            self.log.emit("SUCCESS", "Фоновое поле сохранено как нулевое")
         except Exception as error:
-            self.log.emit(f"Ошибка калибровки: {error}")
+            self._sensor_failed(error, "Калибровка")
 
     @Slot()
     def read_sensor(self) -> None:
-        if not self._sensor_ready():
+        """Делает одно усреднённое измерение для живых чисел интерфейса."""
+        if not self.sensor or self.scanning:
             return
         try:
-            value = self.sensor.measure()
-            self.measurement.emit(value)
-            self.log.emit("Получено контрольное измерение.")
+            self.measurement.emit(self.sensor.measure())
         except Exception as error:
-            self.log.emit(f"Ошибка измерения: {error}")
+            self._sensor_failed(error, "Измерение")
+        finally:
+            self.read_done.emit()
+
+    @Slot()
+    def read_position(self) -> None:
+        """Запрашивает реальные координаты принтера у прошивки через M114."""
+        if not self.printer or self.scanning:
+            self.position_done.emit()
+            return
+        try:
+            self.current_position = self.printer.query_position()
+            self.position.emit(dict(self.current_position))
+        except TimeoutError:
+            # Если один запрос позиции потерялся, не засоряем консоль и просто
+            # оставляем последнее известное положение до следующего опроса.
+            pass
+        except Exception as error:
+            self.log.emit("ERROR", f"Позиция принтера: {error}")
+        finally:
+            self.position_done.emit()
+
+    def _sensor_failed(self, error: Exception, operation: str) -> None:
+        """Помечает датчик недоступным после ошибки I²C и останавливает опрос.
+
+        `Remote I/O error` означает, что Linux не получил ответ от MLX90393.
+        Обнуление self.sensor не даёт таймеру 100 мс бесконечно писать ошибки.
+        """
+        self.sensor = None
+        self.status.emit("sensor", False, f"Ошибка I²C: {error}")
+        self.log.emit("ERROR", f"{operation}: {error}")
 
     @Slot(dict)
     def start_scan(self, parameters: dict) -> None:
-        if not self._printer_ready() or not self._sensor_ready():
-            self.scan_failed.emit("Подключите принтер и датчик перед сканированием.")
+        # Этот слот выполняется в QThread. Поэтому длительный scan() не
+        # замораживает HTML-интерфейс и позволяет отображать прогресс.
+        if not self.printer or not self.sensor:
+            self.scan_failed.emit("Перед сканированием подключите принтер и MLX90393")
             return
+        self.scanning = True
+        self.cancel_requested = False
         try:
-            self.cancel_requested = False
-            self.log.emit("Калибровка датчика и возврат домой…")
+            self.log.emit("INFO", "Калибровка датчика и поиск дома принтера")
             self.sensor.zero()
             self.printer.home()
+            self.printer_homed = True
+            self.status.emit("printer", True, f"{PRINTER_PORT} · откалиброван")
             results = scan(
                 self.printer, self.sensor, parameters, confirm=False,
-                progress_callback=lambda point, total, value: self.scan_progress.emit(point, total, value),
+                progress_callback=lambda point, total, value: self.progress.emit(point, total, value),
                 cancelled=lambda: self.cancel_requested,
             )
             filename = save(results)
             save_scan(filename, parameters, results)
+            center_x, center_y = sensor_to_printer(0, 0)
+            self.current_position = {
+                "x": center_x,
+                "y": center_y,
+                "z": parameters["height"] + SCAN_HEIGHT + 20,
+            }
+            self.position.emit(dict(self.current_position))
             self.scan_finished.emit(filename)
-            self.log.emit("Сканирование завершено. CSV и архив сохранены.")
+            self.log.emit("SUCCESS", f"Сканирование сохранено: {filename}")
         except ScanCancelled:
-            self.scan_failed.emit("Сканирование остановлено.")
-            self.log.emit("Сканирование отменено.")
+            self.scan_failed.emit("Сканирование отменено оператором")
+            self.log.emit("WARNING", "Сканирование отменено")
         except Exception as error:
+            # Ошибка I²C во время скана также должна погасить зелёный индикатор.
+            if isinstance(error, OSError):
+                self._sensor_failed(error, "Сканирование")
             self.scan_failed.emit(str(error))
-            self.log.emit(f"Ошибка сканирования: {error}")
+            self.log.emit("ERROR", f"Сканирование: {error}")
+        finally:
+            self.scanning = False
 
     def emergency_stop_now(self) -> None:
-        """M112 is deliberately immediate and does not wait for the worker queue."""
+        """Немедленно шлёт M112; восстановление M999 выполняется отдельно.
+
+        Этот метод намеренно вызывается напрямую из GUI-потока: M112 должен
+        попасть в USB-порт даже тогда, когда worker занят долгим сканом.
+        Он делает только неблокирующую запись, не читает порт и не отправляет
+        другие команды, поэтому не конкурирует с ожидающим `send()`.
+        """
         self.cancel_requested = True
+        self.printer_homed = False
+        self.awaiting_emergency_recovery = True
         if self.printer:
-            self.printer.stop()
-        self.log.emit("Отправлена аварийная остановка M112.")
+            try:
+                self.printer.stop()
+                self.status.emit("printer", True, f"{PRINTER_PORT} · требуется G28")
+                self.log.emit("WARNING", "Аварийная остановка M112 отправлена")
+            except Exception as error:
+                self.log.emit("ERROR", f"Аварийная остановка: {error}")
+                return
+        else:
+            self.log.emit("ERROR", "Передана аварийная остановка M112")
 
-    def _printer_ready(self) -> bool:
-        if self.printer:
-            return True
-        self.log.emit("Сначала подключите принтер.")
-        return False
+    @Slot()
+    def recover_after_emergency_stop(self) -> None:
+        """Снимает emergency-state после завершения или прерывания операции."""
+        if not self.awaiting_emergency_recovery or not self.printer:
+            return
+        try:
+            self.printer.recover_after_stop()
+            self.awaiting_emergency_recovery = False
+            self.status.emit("printer", True, f"{PRINTER_PORT} · требуется G28")
+            self.log.emit("SUCCESS", "Принтер восстановлен после M112; выполните G28")
+        except Exception as error:
+            self.log.emit("ERROR", f"Восстановление после M112: {error}")
 
-    def _sensor_ready(self) -> bool:
-        if self.sensor:
-            return True
-        self.log.emit("Сначала подключите датчик.")
-        return False
+
+class Bridge(QObject):
+    """Явный и небольшой API, доступный JavaScript через QWebChannel."""
+
+    def __init__(self, window: "StudioWindow") -> None:
+        super().__init__()
+        self.window = window
+
+    # Имена слотов camelCase совпадают с вызовами JavaScript в studio.html.
+    # Однострочные методы ниже не делают работу сами: они только передают
+    # запрос в сигнальную систему Qt, чтобы UI не ждал порт или I²C.
+    @Slot()
+    def connectPrinter(self) -> None: self.window.connect_printer_requested.emit()
+    @Slot()
+    def connectSensor(self) -> None: self.window.connect_sensor_requested.emit()
+    @Slot()
+    def home(self) -> None: self.window.home_requested.emit()
+    @Slot()
+    def motorsOff(self) -> None: self.window.motors_off_requested.emit()
+    @Slot()
+    def motorsOn(self) -> None: self.window.motors_on_requested.emit()
+    @Slot(str)
+    def moveAxes(self, payload: str) -> None:
+        """Получает JSON координат и запускает ручное перемещение принтера."""
+        try:
+            coordinates = json.loads(payload)
+            self.window.move_requested.emit(coordinates)
+        except (TypeError, ValueError) as error:
+            # Некорректный JSON нельзя отправлять в worker: это была бы
+            # потенциально опасная команда движения с неполными координатами.
+            self.window.push("log", {"level": "ERROR", "message": f"Invalid move request: {error}"})
+    @Slot()
+    def calibrate(self) -> None: self.window.calibrate_requested.emit()
+    @Slot()
+    def cancelScan(self) -> None: self.window.cancel_scan()
+    @Slot()
+    def emergencyStop(self) -> None: self.window.emergency_stop()
+
+    @Slot(str)
+    def startScan(self, payload: str) -> None:
+        """Получает JSON параметров из HTML и отправляет словарь в worker-поток."""
+        try:
+            parameters = json.loads(payload)
+            self.window.scan_requested.emit(parameters)
+        except (TypeError, ValueError) as error:
+            # Ошибка парсинга показывается в консоли HTML вместо падения GUI.
+            self.window.push("log", {"level": "ERROR", "message": f"Invalid scan request: {error}"})
+
+    @Slot(result=str)
+    def archive(self) -> str:
+        """Возвращает JS строку JSON со списком сканов SQLite."""
+        return json.dumps([dict(item) for item in list_scans()])
+
+    @Slot(int, result=str)
+    def points(self, scan_id: int) -> str:
+        """Возвращает JS строку JSON с точками одного выбранного скана."""
+        return json.dumps([dict(item) for item in get_points(scan_id)])
+
+    @Slot(result=str)
+    def configuration(self) -> str:
+        """Возвращает геометрию из config.py для точной рамки карты.
+
+        HTML не хранит вторую копию смещений датчика: пользователь меняет
+        SENSOR_OFFSET_X/Y в одном месте, а UI получает их при каждом запуске.
+        """
+        return json.dumps({
+            "bed_x": BED_SIZE_X,
+            "bed_y": BED_SIZE_Y,
+            "sensor_offset_x": SENSOR_OFFSET_X,
+            "sensor_offset_y": SENSOR_OFFSET_Y,
+        })
 
 
-class ScannerWindow(QMainWindow):
+class TitleBar(QFrame):
+    """Своя шапка frameless-окна с названием, настройками и кнопками окна."""
+    def __init__(self, window: "StudioWindow") -> None:
+        super().__init__(objectName="titlebar")
+        self.window = window
+        self.drag_origin: QPoint | None = None
+        # QHBoxLayout держит бренд слева, растяжку посередине и управление
+        # окном справа независимо от ширины основного WebEngine-интерфейса.
+        row = QHBoxLayout(self)
+        row.setContentsMargins(14, 0, 8, 0)
+        self.brand = QPushButton("NEXUS  /  MAGNETIC FIELD STUDIO", objectName="brand")
+        # SVG — локальный знак приложения; Qt масштабирует его без потери
+        # чёткости на обычных и HiDPI-экранах.
+        self.brand.setIcon(QIcon(str(Path(__file__).parent / "ui" / "nexus-mark.svg")))
+        self.brand.setIconSize(QSize(17, 17))
+        self.brand.setEnabled(False)
+        row.addWidget(self.brand)
+        row.addStretch()
+        # Каждая кнопка вызывает нативное действие окна или событие в HTML.
+        # Кортеж описывает символ, Qt-действие и всплывающую подсказку каждой
+        # кнопки, чтобы не копировать одинаковый код создания QPushButton.
+        for symbol, action, tip in (("⚙", window.open_settings, "Настройки"), ("—", window.showMinimized, "Свернуть"), ("□", window.toggle_maximize, "Развернуть"), ("×", window.close, "Закрыть")):
+            button = QPushButton(symbol, objectName="windowControl")
+            button.setToolTip(tip)
+            button.clicked.connect(action)
+            row.addWidget(button)
+
+    def mousePressEvent(self, event) -> None:
+        # Frameless-окно не имеет системной шапки, поэтому перемещаем его сами.
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.drag_origin = event.globalPosition().toPoint() - self.window.frameGeometry().topLeft()
+
+    def mouseMoveEvent(self, event) -> None:
+        if self.drag_origin and event.buttons() & Qt.MouseButton.LeftButton and not self.window.isMaximized():
+            self.window.move(event.globalPosition().toPoint() - self.drag_origin)
+
+    def mouseReleaseEvent(self, event) -> None:
+        self.drag_origin = None
+
+
+class StudioWindow(QMainWindow):
+    """Главное окно: соединяет нативную Qt-оболочку, WebEngine и оборудование."""
+    # Сигналы описывают команды из GUI в worker. Благодаря им выполнение
+    # оказывается в QThread, а не в потоке рисования Qt.
     connect_printer_requested = Signal()
     connect_sensor_requested = Signal()
     home_requested = Signal()
     motors_off_requested = Signal()
+    motors_on_requested = Signal()
+    move_requested = Signal(dict)
     calibrate_requested = Signal()
-    measure_requested = Signal()
+    cancel_scan_requested = Signal()
+    recover_requested = Signal()
+    read_requested = Signal()
+    position_requested = Signal()
     scan_requested = Signal(dict)
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle(f"{PROJECT_NAME} — Studio")
-        self.resize(1280, 790)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
+        self.setMinimumSize(1060, 680)
+        self.resize(1540, 930)
+        # Защита от очереди из сотен запросов: пока датчик отвечает, новый
+        # запрос от таймера 100 мс не создаётся.
+        self.measurement_pending = False
+        self.position_pending = False
         self._build_worker()
-        self._build_ui()
-        self._load_archive()
+        root = QWidget(objectName="nativeRoot")
+        layout = QVBoxLayout(root)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(TitleBar(self))
+        self.web = QWebEngineView()
+        # UI и будущие графики лежат в проекте. Запрет внешних ресурсов убирает
+        # лишние сетевые обращения Chromium и делает запуск предсказуемее.
+        self.web.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, False)
+        self.channel = QWebChannel(self.web.page())
+        self.bridge = Bridge(self)
+        self.channel.registerObject("bridge", self.bridge)
+        self.web.page().setWebChannel(self.channel)
+        self.web.setUrl(QUrl.fromLocalFile(str(Path(__file__).parent / "ui" / "studio.html")))
+        layout.addWidget(self.web, 1)
+        self.setCentralWidget(root)
+        # Два отдельных таймера легче настраивать и проще контролировать:
+        # датчик читаем немного чаще, координаты принтера — заметно реже.
+        self.live_timer = QTimer(self)
+        # 4 измерения в секунду достаточно для живых чисел без движения, но
+        # заметно бережнее для I²C и Raspberry Pi, чем прежние 6.25 Гц.
+        self.live_timer.setInterval(250)
+        self.live_timer.timeout.connect(self._poll_live_data)
+        self.live_timer.start()
+        self.position_timer = QTimer(self)
+        # M114 идёт через тот же serial-порт, что и G-code. Редкий опрос не
+        # забивает очередь прошивки; ручные движения всё равно обновляют XYZ
+        # сразу после завершения команды.
+        self.position_timer.setInterval(750)
+        self.position_timer.timeout.connect(self._poll_position)
+        self.position_timer.start()
+        # После старта окна сразу пробуем подключить принтер и датчик.
+        QTimer.singleShot(350, self._auto_connect_devices)
 
     def _build_worker(self) -> None:
+        # Все сигналы подключены к методам окна, а не к lambda: так Qt ставит
+        # обновление WebEngine в главный поток и приложение не падает.
         self.thread = QThread(self)
         self.worker = HardwareWorker()
         self.worker.moveToThread(self.thread)
@@ -176,352 +510,119 @@ class ScannerWindow(QMainWindow):
         self.connect_sensor_requested.connect(self.worker.connect_sensor)
         self.home_requested.connect(self.worker.home)
         self.motors_off_requested.connect(self.worker.motors_off)
-        self.calibrate_requested.connect(self.worker.calibrate_sensor)
-        self.measure_requested.connect(self.worker.read_sensor)
+        self.motors_on_requested.connect(self.worker.motors_on)
+        self.move_requested.connect(self.worker.manual_move)
+        self.calibrate_requested.connect(self.worker.calibrate)
+        self.cancel_scan_requested.connect(self.worker.cancel_scan)
+        self.recover_requested.connect(self.worker.recover_after_emergency_stop)
+        self.read_requested.connect(self.worker.read_sensor)
+        self.position_requested.connect(self.worker.read_position)
         self.scan_requested.connect(self.worker.start_scan)
-        self.worker.log.connect(self._append_log)
-        self.worker.printer_state.connect(self._set_printer_state)
-        self.worker.sensor_state.connect(self._set_sensor_state)
-        self.worker.measurement.connect(self._show_measurement)
-        self.worker.scan_progress.connect(self._show_progress)
+        self.worker.log.connect(self._handle_log)
+        self.worker.status.connect(self._handle_status)
+        self.worker.measurement.connect(self._measurement)
+        self.worker.position.connect(self._position)
+        self.worker.read_done.connect(self._read_done)
+        self.worker.position_done.connect(self._position_done)
+        self.worker.progress.connect(self._progress)
         self.worker.scan_finished.connect(self._scan_finished)
         self.worker.scan_failed.connect(self._scan_failed)
         self.thread.start()
 
-    def _build_ui(self) -> None:
-        root = QWidget(objectName="root")
-        self.setCentralWidget(root)
-        layout = QVBoxLayout(root)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        layout.addWidget(self._header())
-        body = QHBoxLayout()
-        body.setContentsMargins(0, 0, 0, 0)
-        body.setSpacing(0)
-        body.addWidget(self._sidebar())
-        self.pages = QStackedWidget()
-        self.pages.addWidget(self._dashboard_page())
-        self.pages.addWidget(self._scan_page())
-        self.pages.addWidget(self._calibration_page())
-        self.pages.addWidget(self._archive_page())
-        body.addWidget(self.pages, 1)
-        layout.addLayout(body, 1)
-        layout.addWidget(self._statusbar())
+    def push(self, event: str, payload: dict) -> None:
+        # Передаём событие в JS как JSON — так строки и числа безопасно экранируются.
+        script = f"window.NexusApp && window.NexusApp.receive({json.dumps(event)}, {json.dumps(payload)});"
+        self.web.page().runJavaScript(script)
 
-    def _header(self) -> QWidget:
-        bar = QFrame(objectName="header")
-        row = QHBoxLayout(bar)
-        row.setContentsMargins(18, 7, 18, 7)
-        row.addWidget(QLabel("◆  MAGNET SCANNER", objectName="logo"))
-        row.addSpacing(18)
-        for text, page in (("Рабочая область", 0), ("Сканирование", 1), ("Калибровка", 2), ("Архив", 3)):
-            button = QPushButton(text, objectName="nav")
-            button.clicked.connect(lambda checked=False, index=page: self._show_page(index))
-            row.addWidget(button)
-        row.addStretch()
-        row.addWidget(QLabel(f"{PROJECT_NAME} · {PROJECT_VERSION}", objectName="version"))
-        return bar
+    def _auto_connect_devices(self) -> None:
+        """Пробует подключить принтер и MLX90393 сразу после запуска окна."""
+        self.connect_printer_requested.emit()
+        self.connect_sensor_requested.emit()
 
-    def _sidebar(self) -> QWidget:
-        panel = QFrame(objectName="sidebar")
-        panel.setFixedWidth(292)
-        column = QVBoxLayout(panel)
-        column.setContentsMargins(14, 16, 14, 16)
-        column.setSpacing(9)
-        column.addWidget(self._section("ПОДКЛЮЧЕНИЯ"))
-        self.printer_label = self._state_label("Принтер", "Не подключен")
-        self.sensor_label = self._state_label("Датчик", "Не подключен")
-        column.addWidget(self.printer_label)
-        column.addWidget(self._button("Подключить принтер", self.connect_printer_requested.emit))
-        column.addWidget(self.sensor_label)
-        column.addWidget(self._button("Подключить MLX90393", self.connect_sensor_requested.emit))
-        column.addSpacing(9)
-        column.addWidget(self._section("ПРИНТЕР"))
-        column.addWidget(self._button("Домой · G28", self.home_requested.emit))
-        column.addWidget(self._button("Отключить двигатели · M84", self.motors_off_requested.emit))
-        stop = self._button("Стоп · M112", self._emergency_stop)
-        stop.setObjectName("emergency")
-        column.addWidget(stop)
-        column.addSpacing(9)
-        column.addWidget(self._section("ЖУРНАЛ"))
-        self.log_label = QLabel("Готово. Подключите оборудование.", objectName="log")
-        self.log_label.setWordWrap(True)
-        column.addWidget(self.log_label)
-        column.addStretch()
-        return panel
+    def _poll_live_data(self) -> None:
+        """Периодически обновляет датчик и координаты принтера без блокировки UI."""
+        # Не ставим новое чтение, пока не завершилось предыдущее измерение.
+        if self.worker.sensor and not self.worker.scanning and not self.measurement_pending:
+            self.measurement_pending = True
+            self.read_requested.emit()
 
-    def _dashboard_page(self) -> QWidget:
-        page = QWidget(objectName="page")
-        box = self._page_layout(page, "Рабочая область", "Спокойная панель управления для подготовки измерений")
-        grid = QGridLayout()
-        self.field_card = self._card("ПОСЛЕДНЕЕ ПОЛЕ", "— µT")
-        self.printer_card = self._card("ПРИНТЕР", "Не подключен")
-        self.sensor_card = self._card("ДАТЧИК", "Не подключен")
-        grid.addWidget(self._card("СОСТОЯНИЕ", "Ожидание"), 0, 0)
-        grid.addWidget(self.printer_card, 0, 1)
-        grid.addWidget(self.sensor_card, 0, 2)
-        grid.addWidget(self.field_card, 0, 3)
-        box.addLayout(grid)
-        card = QFrame(objectName="largeCard")
-        inside = QVBoxLayout(card)
-        inside.addWidget(QLabel("Следующий шаг", objectName="panelTitle"))
-        message = QLabel("Подключите принтер и датчик, откройте «Сканирование» и задайте параметры магнита. "
-                         "Карта поля и Plotly-графики будут построены на основе записей в архиве.", objectName="placeholder")
-        message.setWordWrap(True)
-        inside.addWidget(message)
-        button = self._button("Перейти к параметрам", lambda: self._show_page(1))
-        button.setObjectName("quietAction")
-        inside.addWidget(button, alignment=Qt.AlignmentFlag.AlignLeft)
-        box.addWidget(card, 1)
-        return page
+    def _poll_position(self) -> None:
+        """Опрос текущей позиции принтера отдельным редким таймером."""
+        if self.worker.printer and not self.worker.scanning and not self.position_pending:
+            self.position_pending = True
+            self.position_requested.emit()
 
-    def _scan_page(self) -> QWidget:
-        page = QWidget(objectName="page")
-        box = self._page_layout(page, "Сканирование", "Параметры траектории. Перед началом принтер выполнит G28, а датчик запомнит ноль.")
-        form = QFrame(objectName="largeCard")
-        grid = QGridLayout(form)
-        grid.setContentsMargins(24, 22, 24, 22)
-        grid.setHorizontalSpacing(24)
-        grid.setVerticalSpacing(12)
-        self.shape = QComboBox()
-        self.shape.addItem("Цилиндр", "cylinder")
-        self.shape.addItem("Прямоугольник", "rectangle")
-        self.shape.currentIndexChanged.connect(self._update_shape_fields)
-        self.size_x = self._spin(20.0)
-        self.size_y = self._spin(20.0)
-        self.height = self._spin(5.0)
-        self.step = self._spin(2.0, 0.1)
-        self.dimension_label = QLabel("Диаметр, мм")
-        self.size_y_label = QLabel("Размер Y, мм")
-        entries = (("Форма", self.shape), (self.dimension_label, self.size_x),
-                   (self.size_y_label, self.size_y), ("Высота магнита, мм", self.height),
-                   ("Шаг сканирования, мм", self.step))
-        for row, (label, widget) in enumerate(entries):
-            label = QLabel(label) if isinstance(label, str) else label
-            grid.addWidget(label, row, 0)
-            grid.addWidget(widget, row, 1)
-            if row == 2:
-                self.size_y_label = label
-                self.size_y_row = row
-        self.progress = QProgressBar()
-        self.progress.setValue(0)
-        self.progress.setFormat("Ожидание запуска")
-        grid.addWidget(self.progress, 5, 0, 1, 2)
-        self.scan_confirm = QCheckBox("Магнит закреплён в центре стола; движение безопасно")
-        self.scan_confirm.toggled.connect(self._set_scan_enabled)
-        grid.addWidget(self.scan_confirm, 6, 0, 1, 2)
-        self.scan_button = self._button("Начать сканирование", self._start_scan)
-        self.scan_button.setObjectName("quietAction")
-        self.scan_button.setEnabled(False)
-        grid.addWidget(self.scan_button, 7, 0, 1, 2)
-        box.addWidget(form)
-        box.addStretch()
-        self._update_shape_fields()
-        return page
+    def _measurement(self, value: dict) -> None:
+        """Передаёт свежие Bx/By/Bz/|B| из worker-потока в JavaScript."""
+        self.push("measurement", value)  # JavaScript обновит Bx/By/Bz/|B|.
 
-    def _calibration_page(self) -> QWidget:
-        page = QWidget(objectName="page")
-        box = self._page_layout(page, "Калибровка", "Уберите магнит от датчика: измеренное поле станет нулевой точкой.")
-        card = QFrame(objectName="largeCard")
-        inside = QVBoxLayout(card)
-        inside.addWidget(QLabel("Текущее поле", objectName="panelTitle"))
-        self.measurement_label = QLabel("Нет измерений", objectName="measurement")
-        inside.addWidget(self.measurement_label)
-        inside.addWidget(self._button("Считать показания", self.measure_requested.emit))
-        calibrate = self._button("Сохранить ноль датчика", self.calibrate_requested.emit)
-        calibrate.setObjectName("quietAction")
-        inside.addWidget(calibrate)
-        box.addWidget(card)
-        box.addStretch()
-        return page
+    @Slot(dict)
+    def _position(self, value: dict) -> None:
+        """Передаёт интерфейсу последние известные координаты принтера."""
+        self.push("position", value)
 
-    def _archive_page(self) -> QWidget:
-        page = QWidget(objectName="page")
-        box = self._page_layout(page, "Архив измерений", "CSV остаётся в папке results, а точки дополнительно доступны в локальной базе приложения.")
-        controls = QHBoxLayout()
-        refresh = self._button("Обновить список", self._load_archive)
-        controls.addWidget(refresh)
-        controls.addStretch()
-        box.addLayout(controls)
-        self.scan_table = QTableWidget(0, 5)
-        self.scan_table.setHorizontalHeaderLabels(["Дата", "Форма", "Размер", "Шаг", "Точек"])
-        self.scan_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.scan_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.scan_table.itemSelectionChanged.connect(self._load_selected_points)
-        self.scan_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        box.addWidget(self.scan_table, 1)
-        box.addWidget(QLabel("Точки выбранного сканирования", objectName="panelTitle"))
-        self.points_table = QTableWidget(0, 8)
-        self.points_table.setHorizontalHeaderLabels(["№", "X", "Y", "Z", "Bx, µT", "By, µT", "Bz, µT", "|B|, µT"])
-        self.points_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.points_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        box.addWidget(self.points_table, 2)
-        return page
+    @Slot()
+    def _read_done(self) -> None:
+        # Следующий тик live_timer теперь может поставить новое I²C-чтение.
+        self.measurement_pending = False
 
-    def _statusbar(self) -> QWidget:
-        bar = QFrame(objectName="statusbar")
-        row = QHBoxLayout(bar)
-        row.setContentsMargins(16, 4, 16, 4)
-        self.status = QLabel("● Система готова")
-        row.addWidget(self.status)
-        row.addStretch()
-        row.addWidget(QLabel("Ubuntu · PySide6 · MLX90393", objectName="version"))
-        return bar
+    @Slot()
+    def _position_done(self) -> None:
+        # Аналогично снимаем блокировку следующего запроса M114.
+        self.position_pending = False
 
-    def _show_page(self, index: int) -> None:
-        self.pages.setCurrentIndex(index)
-        if index == 3:
-            self._load_archive()
+    @Slot(str, str)
+    def _handle_log(self, level: str, message: str) -> None:
+        self.push("log", {"level": level, "message": message})
 
-    def _update_shape_fields(self) -> None:
-        cylinder = self.shape.currentData() == "cylinder"
-        self.dimension_label.setText("Диаметр, мм" if cylinder else "Размер X, мм")
-        self.size_y_label.setVisible(not cylinder)
-        self.size_y.setVisible(not cylinder)
+    @Slot(str, bool, str)
+    def _handle_status(self, device: str, connected: bool, text: str) -> None:
+        self.push("status", {"device": device, "connected": connected, "text": text})
 
-    def _set_scan_enabled(self, checked: bool) -> None:
-        self.scan_button.setEnabled(checked)
-
-    def _start_scan(self) -> None:
-        x = self.size_x.value()
-        parameters = {
-            "shape": self.shape.currentData(), "size_x": x,
-            "size_y": x if self.shape.currentData() == "cylinder" else self.size_y.value(),
-            "height": self.height.value(), "step": self.step.value(),
-        }
-        self.progress.setValue(0)
-        self.progress.setFormat("Подготовка оборудования…")
-        self.scan_button.setEnabled(False)
-        self.scan_requested.emit(parameters)
-
-    def _emergency_stop(self) -> None:
-        self.worker.emergency_stop_now()
-        self.scan_button.setEnabled(self.scan_confirm.isChecked())
-        self.progress.setFormat("Отправлена аварийная остановка")
-
-    def _show_progress(self, point: int, total: int, value: dict) -> None:
-        self.progress.setMaximum(total)
-        self.progress.setValue(point)
-        self.progress.setFormat(f"Точка {point}/{total} · |B| = {value['b']:.2f} µT")
-        self._show_measurement(value)
-
+    @Slot(str)
     def _scan_finished(self, filename: str) -> None:
-        self.progress.setFormat(f"Готово · {Path(filename).name}")
-        self.scan_confirm.setChecked(False)
-        self._load_archive()
-        self._show_page(3)
+        self.push("scanFinished", {"filename": filename})
+        self.recover_requested.emit()
 
+    @Slot(str)
     def _scan_failed(self, message: str) -> None:
-        self.progress.setFormat(f"Не выполнено · {message}")
-        self.scan_button.setEnabled(self.scan_confirm.isChecked())
+        self.push("scanFailed", {"message": message})
+        self.recover_requested.emit()
 
-    def _show_measurement(self, value: dict) -> None:
-        self.measurement_label.setText(
-            f"Bx {value['bx']:.2f} µT   ·   By {value['by']:.2f} µT   ·   "
-            f"Bz {value['bz']:.2f} µT   ·   |B| {value['b']:.2f} µT"
-        )
-        self.field_card.findChild(QLabel, "cardValue").setText(f"{value['b']:.2f} µT")
+    def _progress(self, point: int, total: int, value: dict) -> None:
+        """Передаёт HTML номер точки, общее число точек и последнее значение."""
+        self.push("progress", {"point": point, "total": total, "value": value})
 
-    def _load_archive(self) -> None:
-        scans = list_scans()
-        self.scan_table.blockSignals(True)
-        self.scan_table.setRowCount(len(scans))
-        for row, scan_item in enumerate(scans):
-            size = f"Ø {scan_item['size_x']:.1f} мм" if scan_item["shape"] == "cylinder" else f"{scan_item['size_x']:.1f} × {scan_item['size_y']:.1f} мм"
-            values = (scan_item["created_at"].replace("T", " "), "Цилиндр" if scan_item["shape"] == "cylinder" else "Прямоугольник", size, f"{scan_item['step']:.2f} мм", str(scan_item["point_count"]))
-            for column, value in enumerate(values):
-                cell = QTableWidgetItem(value)
-                cell.setData(Qt.ItemDataRole.UserRole, scan_item["id"])
-                self.scan_table.setItem(row, column, cell)
-        self.scan_table.blockSignals(False)
-        self.points_table.setRowCount(0)
-        if scans:
-            self.scan_table.selectRow(0)
-            # selectRow() does not reliably emit itemSelectionChanged after a
-            # model rebuild on every Qt platform, so populate the preview
-            # explicitly as well.
-            self._load_selected_points()
+    def emergency_stop(self) -> None:
+        """Точка входа M112, вызываемая кнопкой HTML через Bridge."""
+        self.worker.emergency_stop_now()
+        # Если M112 был нажата вне сканирования, worker уже свободен. При
+        # сканировании сигнал дождётся завершения слота в QThread.
+        QTimer.singleShot(650, self.recover_requested.emit)
 
-    def _load_selected_points(self) -> None:
-        rows = self.scan_table.selectionModel().selectedRows()
-        if not rows:
-            return
-        scan_id = self.scan_table.item(rows[0].row(), 0).data(Qt.ItemDataRole.UserRole)
-        points = get_points(scan_id)
-        self.points_table.setUpdatesEnabled(False)
-        self.points_table.setRowCount(len(points))
-        for row, point in enumerate(points):
-            values = (point["point_no"], point["x"], point["y"], point["z"], point["bx"], point["by"], point["bz"], point["b"])
-            for column, value in enumerate(values):
-                text = str(value) if column == 0 else f"{value:.3f}"
-                self.points_table.setItem(row, column, QTableWidgetItem(text))
-        self.points_table.setUpdatesEnabled(True)
+    def cancel_scan(self) -> None:
+        """Останавливает текущее сканирование без аварийной блокировки принтера."""
+        self.cancel_scan_requested.emit()
 
-    def _append_log(self, message: str) -> None:
-        self.log_label.setText(message)
-        self.status.setText(f"● {message}")
+    def open_settings(self) -> None:
+        self.push("navigate", {"page": "settings"})
 
-    def _set_printer_state(self, connected: bool, text: str) -> None:
-        color = "#b8e3cd" if connected else "#cf9bab"
-        self.printer_label.setText(f"<b>Принтер</b><br><span style='color:{color}'>{text}</span>")
-        self.printer_card.findChild(QLabel, "cardValue").setText(text)
-
-    def _set_sensor_state(self, connected: bool, text: str) -> None:
-        color = "#b8e3cd" if connected else "#cf9bab"
-        self.sensor_label.setText(f"<b>Датчик</b><br><span style='color:{color}'>{text}</span>")
-        self.sensor_card.findChild(QLabel, "cardValue").setText(text)
-
-    @staticmethod
-    def _page_layout(page: QWidget, title: str, subtitle: str) -> QVBoxLayout:
-        box = QVBoxLayout(page)
-        box.setContentsMargins(30, 26, 30, 26)
-        box.setSpacing(12)
-        box.addWidget(QLabel(title, objectName="pageTitle"))
-        box.addWidget(QLabel(subtitle, objectName="subtitle"))
-        return box
-
-    @staticmethod
-    def _section(text: str) -> QLabel:
-        return QLabel(text, objectName="section")
-
-    @staticmethod
-    def _button(text: str, callback) -> QPushButton:
-        button = QPushButton(text)
-        button.clicked.connect(callback)
-        return button
-
-    @staticmethod
-    def _state_label(name: str, state: str) -> QLabel:
-        return QLabel(f"<b>{name}</b><br><span>{state}</span>", objectName="device")
-
-    @staticmethod
-    def _spin(value: float, minimum: float = 1.0) -> QDoubleSpinBox:
-        box = QDoubleSpinBox()
-        box.setRange(minimum, 220.0)
-        box.setValue(value)
-        box.setSuffix(" мм")
-        box.setDecimals(2)
-        return box
-
-    @staticmethod
-    def _card(caption: str, value: str) -> QFrame:
-        card = QFrame(objectName="card")
-        box = QVBoxLayout(card)
-        box.addWidget(QLabel(caption, objectName="caption"))
-        box.addWidget(QLabel(value, objectName="cardValue"))
-        return card
+    def toggle_maximize(self) -> None:
+        self.showNormal() if self.isMaximized() else self.showMaximized()
 
     def closeEvent(self, event) -> None:
-        self.worker.emergency_stop_now()
+        """При закрытии просто завершает поток, не оставляя M112 после выхода."""
         self.thread.quit()
-        self.thread.wait(1500)
+        self.thread.wait(1200)
         event.accept()
 
 
 def main() -> int:
+    """Создаёт QApplication, применяет стиль нативной шапки и показывает окно."""
     app = QApplication(sys.argv)
-    app.setStyleSheet((Path(__file__).parent / "ui" / "app.qss").read_text(encoding="utf-8"))
-    window = ScannerWindow()
+    app.setApplicationName(PROJECT_NAME)
+    app.setStyleSheet((Path(__file__).parent / "ui" / "native.qss").read_text(encoding="utf-8"))
+    window = StudioWindow()
     window.show()
     return app.exec()
 
