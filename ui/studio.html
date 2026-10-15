@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+  <script src="heatmap_math.js"></script>
   <style>
     /* CSS идёт от общего к частному: токены → каркас окна → элементы страниц
        → финальная дизайн-система. Последний блок намеренно переопределяет
@@ -177,6 +178,30 @@
     .page-head p{margin:0;color:var(--muted)}
     .toolbar,.actions,.hero-actions{display:flex;gap:8px;flex-wrap:wrap}
 
+    /* Тестовая функция автопоиска центра магнита: отдельный блок на странице
+       сканирования. Он не смешивается с кнопками запуска обычного скана. */
+    .find-center{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:12px;
+      flex-wrap:wrap;
+      margin-top:16px;
+      padding:12px 14px;
+      border:1px dashed rgba(139,92,246,.38);
+      border-radius:10px;
+      background:linear-gradient(180deg,rgba(139,92,246,.07),rgba(139,92,246,.02));
+    }
+    .find-center strong{display:block;font-size:12px;color:#e6def2;margin-bottom:3px}
+    .find-center small{display:block;color:var(--muted);font-size:11px;line-height:1.45;max-width:540px}
+    .find-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+    .find-actions .button{border-color:#6d56a0;background:linear-gradient(180deg,#3b2a55,#2d2240)}
+    .find-actions .button:hover{border-color:#9d82d0;background:linear-gradient(180deg,#4a3468,#352747)}
+    .find-check{display:flex;align-items:center;gap:7px;font-size:11px;color:#c9c0d4;cursor:pointer;user-select:none}
+    .find-check input{width:14px;height:14px;accent-color:#8b5cf6;cursor:pointer}
+    .find-result{margin:10px 2px 0;font-size:11px;color:var(--muted);min-height:15px}
+    .find-result.ok{color:#9be3b8}
+
     .button{
       position:relative;
       overflow:hidden;
@@ -229,6 +254,7 @@
       border-color:rgba(239,68,68,.52);
       transform:none;
     }
+    .archive-delete{min-height:28px;padding:4px 8px;font-size:10px;white-space:nowrap}
     .button:disabled{opacity:.45;cursor:not-allowed}
 
     .overview{
@@ -480,6 +506,25 @@
     .table tbody tr:hover,.table tbody tr.selected{background:#352a4d}
     .table td{font-family:ui-monospace;color:#d9d1e2}
     .empty{padding:35px;color:#8c8396;text-align:center}
+    /* Кнопка удаления в архиве: второй клик подтверждает действие. */
+    .row-del{white-space:nowrap;text-align:right}
+    .del-btn{
+      min-width:78px;
+      padding:4px 9px;
+      border:1px solid rgba(239,68,68,.45);
+      border-radius:3px;
+      background:transparent;
+      color:#ef9a9e;
+      font:600 10px Inter,"Noto Sans",sans-serif;
+      cursor:pointer;
+      letter-spacing:.2px;
+    }
+    .del-btn:hover{background:rgba(239,68,68,.14)}
+    .del-btn.armed{
+      background:rgba(239,68,68,.9);
+      border-color:#ffb1b4;
+      color:#fff;
+    }
 
     .inspector{
       grid-row:2;
@@ -644,6 +689,268 @@
     }
     .map-legend .current i{background:#4f8cff}
     .map-legend .target i{background:#8b5cf6}
+    .heat-scale{
+      display:none;
+      align-items:center;
+      gap:7px;
+      color:#b9b0c8;
+      font:10px ui-monospace;
+    }
+    .heat-scale.visible{display:flex}
+    .heat-scale i{
+      width:64px;
+      height:7px;
+      margin:0;
+      border-radius:0;
+      background:linear-gradient(90deg,#12080b,#5e1019,#bd1723,#f04424,#ffc94d,#fff8df);
+    }
+    .toolbar select{
+      min-height:30px;
+      padding:0 26px 0 9px;
+      color:#eee8f4;
+      border:1px solid #493756;
+      border-radius:4px;
+      background:#191320;
+      font-size:11px;
+    }
+    /* Переключатель режимов 2D / 3D */
+    .segmented-control{
+      display:inline-flex;
+      background:#161021;
+      border:1px solid rgba(168,85,247,.25);
+      border-radius:6px;
+      padding:2px;
+      gap:2px;
+    }
+    .seg-btn{
+      border:none;
+      background:transparent;
+      color:var(--muted);
+      padding:4px 10px;
+      font-size:11px;
+      font-weight:600;
+      border-radius:4px;
+      transition:all .18s ease;
+      cursor:pointer;
+    }
+    .seg-btn:hover{
+      color:#fff;
+      background:rgba(255,255,255,.05);
+    }
+    .seg-btn.active{
+      color:#fff;
+      background:linear-gradient(135deg,var(--purple),#6366f1);
+      box-shadow:0 2px 8px rgba(139,92,246,.35);
+    }
+    .heat-3d-hint{
+      position:absolute;
+      bottom:10px;
+      left:50%;
+      transform:translateX(-50%);
+      background:rgba(18,12,24,.85);
+      border:1px solid rgba(168,85,247,.3);
+      backdrop-filter:blur(6px);
+      color:#e2d9f3;
+      padding:4px 12px;
+      border-radius:12px;
+      font-size:10px;
+      pointer-events:none;
+      z-index:4;
+      white-space:nowrap;
+      box-shadow:0 4px 12px rgba(0,0,0,.4);
+    }
+
+    /* Настройки: пресеты, слайдеры, дисклеймеры */
+    .preset-cards{
+      display:grid;
+      grid-template-columns:repeat(3, 1fr);
+      gap:12px;
+      margin-top:8px;
+    }
+    .preset-card{
+      background:rgba(36,29,51,.65);
+      border:1px solid rgba(255,255,255,.08);
+      border-radius:8px;
+      padding:12px;
+      cursor:pointer;
+      transition:all .2s ease;
+    }
+    .preset-card:hover{
+      border-color:rgba(168,85,247,.45);
+      background:rgba(43,35,64,.85);
+      transform:translateY(-2px);
+    }
+    .preset-card.active{
+      border-color:var(--violet);
+      background:rgba(168,85,247,.12);
+      box-shadow:0 4px 16px rgba(168,85,247,.2);
+    }
+    .preset-badge{
+      font-size:10px;
+      font-weight:700;
+      letter-spacing:.5px;
+      color:var(--violet);
+      margin-bottom:4px;
+    }
+    .preset-title{
+      font-size:13px;
+      font-weight:600;
+      color:#fff;
+      margin-bottom:4px;
+    }
+    .preset-desc{
+      font-size:11px;
+      color:var(--muted);
+      line-height:1.4;
+    }
+    .settings-grid{
+      display:grid;
+      grid-template-columns:1fr 1fr;
+      gap:14px;
+      margin-top:14px;
+    }
+    .range-input-row{
+      display:flex;
+      align-items:center;
+      gap:10px;
+    }
+    .range-input-row input[type="range"]{
+      flex:1;
+      accent-color:var(--violet);
+      height:5px;
+      background:#302543;
+      border-radius:3px;
+    }
+    .range-val{
+      font:12px ui-monospace,monospace;
+      font-weight:600;
+      color:#a5b4fc;
+      min-width:65px;
+      text-align:right;
+    }
+    .disclaimer-panel{
+      margin-top:14px;
+      border:1px solid rgba(245,158,11,.35);
+      background:rgba(30,22,18,.6);
+      border-radius:8px;
+      transition:all .3s ease;
+    }
+    .disclaimer-panel.warning{
+      border-color:rgba(245,158,11,.6);
+      background:rgba(45,30,12,.8);
+    }
+    .disclaimer-panel.danger{
+      border-color:rgba(239,68,68,.7);
+      background:rgba(48,16,20,.85);
+    }
+    .disclaimer-content{
+      padding:12px 14px;
+      font-size:12px;
+      line-height:1.55;
+      color:#fde68a;
+    }
+    .badge{
+      padding:2px 8px;
+      font-size:10px;
+      font-weight:700;
+      border-radius:10px;
+      letter-spacing:.5px;
+    }
+    .badge.ok{background:rgba(46,213,115,.2);color:#2ed573;border:1px solid rgba(46,213,115,.35)}
+    .badge.warn{background:rgba(245,158,11,.2);color:#f59e0b;border:1px solid rgba(245,158,11,.45)}
+    .badge.danger{background:rgba(239,68,68,.25);color:#ef4444;border:1px solid rgba(239,68,68,.5)}
+
+    /* Руководство по точности */
+    .guide-panel{
+      margin-top:14px;
+    }
+    .guide-grid{
+      display:grid;
+      grid-template-columns:1fr 1fr;
+      gap:12px;
+      padding:10px 0;
+    }
+    .guide-step{
+      display:flex;
+      gap:10px;
+      background:rgba(255,255,255,.025);
+      padding:10px;
+      border-radius:6px;
+      border:1px solid rgba(255,255,255,.05);
+    }
+    .step-num{
+      width:24px;
+      height:24px;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      background:var(--violet);
+      color:#fff;
+      font-weight:700;
+      font-size:11px;
+      border-radius:50%;
+      flex-shrink:0;
+    }
+    .step-body strong{
+      display:block;
+      font-size:12px;
+      color:#f1f5f9;
+      margin-bottom:4px;
+    }
+    .step-body p{
+      margin:0;
+      font-size:11px;
+      color:var(--muted);
+      line-height:1.45;
+    }
+
+    /* Аппаратно-ускоренная сцена Canvas 2D/3D */
+    .heat-stage{
+      position:relative;
+      width:100%;
+      aspect-ratio:16/9;
+      min-height:360px;
+      overflow:hidden;
+      border:1px solid rgba(168,85,247,.25);
+      border-radius:8px;
+      background:
+        radial-gradient(circle at 50% 50%, rgba(82,39,255,.05), transparent 70%),
+        linear-gradient(90deg,rgba(255,255,255,.025) 1px,transparent 1px),
+        linear-gradient(180deg,rgba(255,255,255,.025) 1px,transparent 1px),
+        #110c18;
+      background-size:100% 100%, 20px 20px, 20px 20px;
+      box-shadow:inset 0 0 24px rgba(0,0,0,.6);
+    }
+    .result-heatmap{
+      position:absolute;
+      inset:0;
+      z-index:2;
+      display:block;
+      width:100%;
+      height:100%;
+      cursor:crosshair;
+    }
+    .result-heatmap.orbiting{
+      cursor:grab;
+    }
+    .result-heatmap.dragging{
+      cursor:grabbing;
+    }
+    .heat-tooltip{
+      display:none;
+      position:absolute;
+      z-index:5;
+      pointer-events:none;
+      padding:7px 9px;
+      border:1px solid rgba(168,85,247,.45);
+      background:rgba(20,13,29,.95);
+      color:#f8f9fb;
+      border-radius:6px;
+      box-shadow:0 8px 22px rgba(0,0,0,.45);
+      font:11px ui-monospace,monospace;
+      white-space:nowrap;
+    }
+    .heat-tooltip.visible{display:block}
     .map-side{
       padding:18px;
     }
@@ -919,7 +1226,38 @@
     .map-readout{padding:8px 12px;background:#1a1424}.map-readout-row{padding:7px 0;font-size:10px}.map-readout-row b{font-size:11px}.map-note{min-height:13px;font-size:10px;color:#8f83a3;line-height:1.3}
     .table th{background:#1c1627}.table th,.table td{padding:9px;border-color:var(--line)}
     .console{background:#151019;border-top-color:var(--line)}.console-head{border-bottom-color:var(--line)}.status{background:#1b1524}.status-coords{border-color:var(--line);background:rgba(20,15,28,.5)}
-    @media (max-width:1250px){.shell{grid-template-columns:212px minmax(0,1fr)}.inspector{display:none}.dashboard-grid{grid-template-columns:1fr 270px}.map-layout{grid-template-columns:minmax(400px,1fr) 250px}}
+    /* Узкий desktop-режим: правый инспектор скрывается первым, а рабочая
+       область остаётся читабельной при сужении окна мышью. */
+    @media (max-width:1250px){
+      .shell{grid-template-columns:212px minmax(0,1fr)}
+      .inspector{display:none}
+      .dashboard-grid{grid-template-columns:1fr 270px}
+      .map-layout{grid-template-columns:minmax(400px,1fr) 250px}
+    }
+    @media (max-width:1040px){
+      .shell{grid-template-columns:188px minmax(0,1fr)}
+      .top-status{display:none}
+      main{padding:20px 18px 28px}
+      .overview{grid-template-columns:repeat(2,minmax(0,1fr))}
+      .dashboard-grid,.scan-layout,.map-layout{grid-template-columns:minmax(0,1fr)}
+      .map-stage{width:min(100%,620px);margin:0 auto}
+      .map-side{width:100%}
+      .status-coords{min-width:0}
+    }
+    @media (max-width:900px){
+      .shell{grid-template-columns:166px minmax(0,1fr)}
+      .nav{padding-left:6px;padding-right:6px}
+      .nav-item{padding:8px 9px;font-size:11px}
+      .nav-caption{font-size:8px;margin-left:9px}
+      main{padding:16px 14px 24px}
+      .page-head{align-items:flex-start;gap:10px;flex-wrap:wrap}
+      .page-head h1{font-size:19px}
+      .overview,.form-grid{grid-template-columns:minmax(0,1fr)}
+      .dashboard-grid{margin-top:10px}
+      .status-coords,.status > span:nth-of-type(2){display:none}
+      .workspaces{gap:6px}
+      .workspaces button{font-size:10px}
+    }
   </style>
 </head>
 <body>
@@ -969,9 +1307,9 @@
       </div>
 
       <div class="overview">
-        <div class="card"><div class="card-top">ПРИНТЕР <span class="card-icon">▣</span></div><div class="metric" id="printerMetric">Не подключён</div><div class="health"><span class="dot" id="printerDot"></span><span id="printerHealth">Ожидание подключения</span></div></div>
+        <div class="card"><div class="card-top">СКАНЕР <span class="card-icon">▣</span></div><div class="metric" id="printerMetric">Не подключён</div><div class="health"><span class="dot" id="printerDot"></span><span id="printerHealth">Ожидание подключения</span></div></div>
         <div class="card"><div class="card-top">MLX90393 <span class="card-icon">◎</span></div><div class="metric" id="sensorMetric">Не подключён</div><div class="health"><span class="dot" id="sensorDot"></span><span id="sensorHealth">I²C адрес 0x0C</span></div></div>
-        <div class="card"><div class="card-top">ТЕКУЩЕЕ |B| <span class="card-icon">⌁</span></div><div class="metric"><span id="dashB">—</span> <span>µT</span></div><div class="health">Текущее измерение</div></div>
+        <div class="card"><div class="card-top">МОДУЛЬ ИНДУКЦИИ |B| <span class="card-icon">⌁</span></div><div class="metric"><span id="dashB">—</span> <span>мТл</span></div><div class="health">Текущее измерение</div></div>
       </div>
 
       <div class="dashboard-grid">
@@ -979,7 +1317,7 @@
           <div class="panel-head"><h2>Подключения</h2></div>
           <div class="panel-body">
             <div class="hero-actions">
-              <button class="button connect-tile primary" onclick="bridge.connectPrinter()"><strong>Принтер</strong><span>/dev/ttyUSB0 · serial</span></button>
+              <button class="button connect-tile primary" onclick="bridge.connectPrinter()"><strong>Сканер</strong><span>/dev/ttyUSB0 · serial</span></button>
               <button class="button connect-tile" onclick="bridge.connectSensor()"><strong>Датчик</strong><span>MLX90393 · I²C</span></button>
             </div>
           </div>
@@ -988,7 +1326,7 @@
         <div class="panel dev-panel clickable" onclick="NexusApp.go('map')">
           <div class="dev-tag">НАВИГАЦИЯ</div>
           <b>Карта поля</b>
-          <span>Клик по рабочей зоне → перемещение принтера</span>
+          <span>Клик по рабочей зоне → перемещение сканера</span>
         </div>
       </div>
       <div class="manual-mode"><span>Ручное позиционирование</span><label><input id="ignoreSensor" type="checkbox" onchange="NexusApp.toggleSensorIgnore()"> Без датчика</label></div>
@@ -1005,12 +1343,12 @@
           <div class="panel-head"><h2>Текущее поле</h2></div>
           <div class="panel-body">
             <div class="live-field" style="margin:0">
-              <div class="eyebrow">МОДУЛЬ |B|</div>
-              <div class="field-value" id="calB">— µT</div>
+              <div class="eyebrow">МОДУЛЬ ИНДУКЦИИ |B|</div>
+              <div class="field-value" id="calB">— мТл</div>
               <div class="axes">
-                <div class="axis">Bx<b id="calBx">—</b></div>
-                <div class="axis">By<b id="calBy">—</b></div>
-                <div class="axis">Bz<b id="calBz">—</b></div>
+                <div class="axis">Bx (мТл)<b id="calBx">—</b></div>
+                <div class="axis">By (мТл)<b id="calBy">—</b></div>
+                <div class="axis">Bz (мТл)<b id="calBz">—</b></div>
               </div>
             </div>
           </div>
@@ -1101,6 +1439,36 @@
               <button class="button primary" id="startBtn" disabled onclick="NexusApp.startScan()">Начать сканирование</button>
               <button class="button" onclick="bridge.cancelScan()">Остановить без аварии</button>
             </div>
+
+            <div class="find-center">
+              <div>
+                <strong>Автопоиск центра и границ магнита (5–10 сек)</strong>
+                <small>Скоростное сканирование по осям X/Y, точное определение центра, физических границ и геометрической формы основания (круглое / прямоугольное).</small>
+              </div>
+              <div style="display:flex;gap:8px;margin-top:8px;align-items:center;">
+                <label style="font-size:12px;opacity:0.8;">Паттерн:</label>
+                <select id="magnetPattern" class="select" style="flex:1;padding:4px 8px;font-size:12px;background:#181c24;color:#eee;border:1px solid #333;border-radius:4px;">
+                  <option value="auto">Автоопределение (Авто)</option>
+                  <option value="circle">Круглое основание (диск / цилиндр)</option>
+                  <option value="rectangle">Прямоугольное основание (брусок)</option>
+                </select>
+              </div>
+              <div class="find-actions" style="margin-top:8px;flex-wrap:wrap;gap:8px;">
+                <button class="button primary" id="findBtn" onclick="NexusApp.findCenter()">Быстрый поиск (5–10 с)</button>
+                <label class="find-check" title="Высокоскоростной проход по осям за 5-10 секунд вместо долгой сетки">
+                  <input type="checkbox" id="fastSearch" checked>
+                  <span>Быстрый режим</span>
+                </label>
+                <label class="find-check" title="Следующее сканирование пойдёт вокруг найденного центра, а не центра стола">
+                  <input type="checkbox" id="centerScan">
+                  <span>Скан от найденного центра</span>
+                </label>
+              </div>
+              <div style="margin-top:8px;display:none;" id="moveCenterBlock">
+                <button class="button small" id="moveToCenterBtn" onclick="NexusApp.moveToFoundCenter()" style="width:100%;background:#2e7d32;color:#fff;">🎯 Навести сопло в центр магнита</button>
+              </div>
+            </div>
+            <p class="find-result" id="findResult">Центр магнита пока не определён</p>
           </div>
         </div>
 
@@ -1117,12 +1485,12 @@
 
     <!-- Отдельный экран крупных мгновенных значений магнитного поля. -->
     <section class="page" id="measurements">
-      <div class="page-head"><div><h1>Измерения</h1></div></div>
+      <div class="page-head"><div><h1>Измерения</h1><p>Проекции и модуль вектора магнитной индукции</p></div></div>
       <div class="overview">
-        <div class="card"><div class="card-top">Bx</div><div class="metric" id="mBx">— <span>µT</span></div></div>
-        <div class="card"><div class="card-top">By</div><div class="metric" id="mBy">— <span>µT</span></div></div>
-        <div class="card"><div class="card-top">Bz</div><div class="metric" id="mBz">— <span>µT</span></div></div>
-        <div class="card"><div class="card-top">|B|</div><div class="metric" id="mB">— <span>µT</span></div></div>
+        <div class="card"><div class="card-top">Проекция Bx (ось X)</div><div class="metric" id="mBx">— <span>мТл</span></div></div>
+        <div class="card"><div class="card-top">Проекция By (ось Y)</div><div class="metric" id="mBy">— <span>мТл</span></div></div>
+        <div class="card"><div class="card-top">Проекция Bz (ось Z)</div><div class="metric" id="mBz">— <span>мТл</span></div></div>
+        <div class="card"><div class="card-top">Модуль индукции |B|</div><div class="metric" id="mB">— <span>мТл</span></div></div>
       </div>
     </section>
 
@@ -1142,7 +1510,7 @@
           <div class="panel-head"><h2>Рабочая зона</h2><small>клик — перемещение</small></div>
           <div class="map-stage-wrap">
             <div class="map-stage" id="mapStage" onclick="NexusApp.mapClick(event)">
-              <div class="map-lock" id="mapLock">Карта заблокирована<button class="button primary" onclick="event.stopPropagation();bridge.home()">Калибровать принтер · G28</button></div>
+              <div class="map-lock" id="mapLock">Карта заблокирована<button class="button primary" onclick="event.stopPropagation();bridge.home()">Калибровать сканер · G28</button></div>
               <div class="map-axis-label top" id="mapLabelTop">Y +90</div>
               <div class="map-axis-label bottom" id="mapLabelBottom">Y −90</div>
               <div class="map-axis-label left" id="mapLabelLeft">X −96</div>
@@ -1189,31 +1557,206 @@
       <div class="page-head"><div><h1>Архив</h1></div><button class="button" onclick="NexusApp.loadArchive()">Обновить</button></div>
       <div class="panel">
         <table class="table">
-          <thead><tr><th>Дата</th><th>Форма</th><th>Размер</th><th>Шаг</th><th>Точек</th><th>CSV</th></tr></thead>
-          <tbody id="scanRows"><tr><td colspan="6" class="empty">Загрузка…</td></tr></tbody>
+          <thead><tr><th>Дата</th><th>Форма</th><th>Размер</th><th>Шаг</th><th>Точек</th><th>CSV</th><th>Действия</th></tr></thead>
+          <tbody id="scanRows"><tr><td colspan="7" class="empty">Загрузка…</td></tr></tbody>
         </table>
+      </div>
+      <div class="panel" style="margin-top:14px">
+        <div class="panel-head">
+          <h2>Визуализация поля</h2>
+          <div class="toolbar compact">
+            <div class="segmented-control">
+              <button class="seg-btn active" id="btnMode2D" onclick="NexusApp.setViewMode('2d')">2D Карта</button>
+              <button class="seg-btn" id="btnMode3D" onclick="NexusApp.setViewMode('3d')">3D Поверхность</button>
+            </div>
+            <select id="heatComponent" onchange="NexusApp.changeHeatComponent()" title="Компонента поля">
+              <option value="b">Модуль |B|</option>
+              <option value="bx">Проекция Bx</option>
+              <option value="by">Проекция By</option>
+              <option value="bz">Проекция Bz</option>
+            </select>
+            <select id="colorPalette" onchange="NexusApp.changePalette()" title="Цветовая палитра">
+              <option value="hot">Hot (Тепловая)</option>
+              <option value="viridis">Viridis</option>
+              <option value="plasma">Plasma</option>
+              <option value="turbo">Turbo (Радуга)</option>
+            </select>
+            <div id="controls3D" style="display:none;align-items:center;gap:4px">
+              <button class="button tiny" id="btnWireframe" onclick="NexusApp.toggle3DWireframe()" title="Включить/выключить сетку">Сетка</button>
+              <button class="button tiny" onclick="NexusApp.reset3DCamera()" title="Сбросить ракурс 3D">Сброс 3D</button>
+            </div>
+            <span class="heat-scale" id="heatScale"><i></i><b id="heatMin">—</b><b id="heatMax">—</b> мТл</span>
+          </div>
+        </div>
+        <div class="heat-stage" id="heatStage">
+          <canvas class="result-heatmap" id="heatCanvas" onmousemove="NexusApp.heatHover(event)" onmouseleave="NexusApp.hideHeatTooltip()" aria-label="Карта измеренного магнитного поля"></canvas>
+          <div class="heat-tooltip" id="heatTooltip"></div>
+          <div class="heat-3d-hint" id="hint3D" style="display:none">🖱️ Зажмите ЛКМ для вращения · Колесо мыши — масштаб</div>
+        </div>
       </div>
       <div class="panel" style="margin-top:14px">
         <div class="panel-head"><h2>Точки</h2><small id="pointCaption">Выберите скан</small></div>
         <div style="max-height:330px;overflow:auto">
           <table class="table">
-            <thead><tr><th>#</th><th>X</th><th>Y</th><th>Z</th><th>Bx</th><th>By</th><th>Bz</th><th>|B|</th></tr></thead>
+            <thead><tr><th>№</th><th>X (мм)</th><th>Y (мм)</th><th>Z (мм)</th><th>Bx (мТл)</th><th>By (мТл)</th><th>Bz (мТл)</th><th>|B| (мТл)</th></tr></thead>
             <tbody id="pointRows"></tbody>
           </table>
         </div>
       </div>
     </section>
 
-    <!-- Настройки показывают значения config.py; редактирование выполняется в коде. -->
+    <!-- Настройки оборудования, скорости сканера и метрологическая памятка -->
     <section class="page" id="settings">
-      <div class="page-head"><div><h1>Настройки</h1></div></div>
+      <div class="page-head">
+        <div>
+          <h1>Настройки сканера</h1>
+          <p>Параметры скорости сканирования, механики станка и точности измерений</p>
+        </div>
+        <div class="toolbar">
+          <button class="button" onclick="NexusApp.resetSettings()">Сброс к базовым</button>
+          <button class="button primary" onclick="NexusApp.saveSettings()">Сохранить настройки</button>
+        </div>
+      </div>
+
+      <!-- Быстрые профили -->
       <div class="panel">
-        <div class="scan-brief">
+        <div class="panel-head">
+          <h2>Профили сканирования</h2>
+          <small>быстрая настройка в один клик</small>
+        </div>
+        <div class="preset-cards">
+          <div class="preset-card" id="presetTurbo" onclick="NexusApp.applyPreset('turbo')">
+            <div class="preset-badge">⚡ ТУРБО / ЭКСПРЕСС</div>
+            <div class="preset-title">Скоростной проход</div>
+            <div class="preset-desc">9000 мм/мин · 30 мс пауза · 1 выборка. Для быстрой оценки положения и формы магнита (~60 сек).</div>
+          </div>
+          <div class="preset-card active" id="presetBalanced" onclick="NexusApp.applyPreset('balanced')">
+            <div class="preset-badge">🎯 СБАЛАНСИРОВАННЫЙ</div>
+            <div class="preset-title">Оптимум Ender 3</div>
+            <div class="preset-desc">6000 мм/мин · 100 мс пауза · 1 выборка. Заводской баланс скорости без лишних вибраций.</div>
+          </div>
+          <div class="preset-card" id="presetLab" onclick="NexusApp.applyPreset('lab')">
+            <div class="preset-badge">🔬 ЛАБОРАТОРНЫЙ</div>
+            <div class="preset-title">Метрологическая точность</div>
+            <div class="preset-desc">2500 мм/мин · 250 мс пауза · 3 выборки. Для научных и дипломных отчётов, устраняет помехи 50 Гц.</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-grid">
+        <!-- Скорость и механика -->
+        <div class="panel">
+          <div class="panel-head"><h2>Механика и скорости сканера</h2></div>
           <div class="form-grid">
-            <div class="field"><label>Порт принтера</label><input value="/dev/ttyUSB0" disabled></div>
-            <div class="field"><label>Адрес датчика</label><input value="0x0C" disabled></div>
-            <div class="field"><label>Тема</label><input value="Dark / Studio" disabled></div>
-            <div class="field"><label>Версия</label><input value="2.0" disabled></div>
+            <div class="field">
+              <label>Рабочая скорость сканирования</label>
+              <div class="range-input-row">
+                <input id="setScanSpeed" type="range" min="1000" max="10000" step="250" value="6000" oninput="NexusApp.onSettingsChange('scanSpeed', this.value)">
+                <span class="range-val" id="valScanSpeed">6000 мм/мин</span>
+              </div>
+            </div>
+            <div class="field">
+              <label>Скорость холостых перемещений</label>
+              <div class="range-input-row">
+                <input id="setMoveSpeed" type="range" min="2000" max="12000" step="500" value="8000" oninput="NexusApp.onSettingsChange('moveSpeed', this.value)">
+                <span class="range-val" id="valMoveSpeed">8000 мм/мин</span>
+              </div>
+            </div>
+            <div class="field">
+              <label>Пауза стабилизации после движения M400</label>
+              <div class="range-input-row">
+                <input id="setSettleTime" type="range" min="0.01" max="0.50" step="0.01" value="0.10" oninput="NexusApp.onSettingsChange('settleTime', this.value)">
+                <span class="range-val" id="valSettleTime">0.10 с</span>
+              </div>
+            </div>
+            <div class="field">
+              <label>Скорость подъёма оси Z</label>
+              <div class="range-input-row">
+                <input id="setZSpeed" type="range" min="500" max="3000" step="100" value="1500" oninput="NexusApp.onSettingsChange('zSpeed', this.value)">
+                <span class="range-val" id="valZSpeed">1500 мм/мин</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Датчик и точность -->
+        <div class="panel">
+          <div class="panel-head"><h2>Датчик MLX90393 и точность</h2></div>
+          <div class="form-grid">
+            <div class="field">
+              <label>Число усреднений на точку</label>
+              <div class="range-input-row">
+                <input id="setSamples" type="range" min="1" max="10" step="1" value="1" oninput="NexusApp.onSettingsChange('samples', this.value)">
+                <span class="range-val" id="valSamples">1 выборка</span>
+              </div>
+            </div>
+            <div class="field">
+              <label>Зазор сканирования Z над образцом</label>
+              <div class="range-input-row">
+                <input id="setScanHeight" type="range" min="1.0" max="25.0" step="0.5" value="5.0" oninput="NexusApp.onSettingsChange('scanHeight', this.value)">
+                <span class="range-val" id="valScanHeight">5.0 мм</span>
+              </div>
+            </div>
+            <div class="field">
+              <label>Таймаут восстановления связи I²C</label>
+              <div class="range-input-row">
+                <input id="setTimeout" type="range" min="1.0" max="15.0" step="0.5" value="5.0" oninput="NexusApp.onSettingsChange('timeout', this.value)">
+                <span class="range-val" id="valTimeout">5.0 с</span>
+              </div>
+            </div>
+            <div class="field">
+              <label>Порт подключения сканера</label>
+              <input id="setPort" value="/dev/ttyUSB0" disabled>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Живой блок физических дисклеймеров и анализа рисков -->
+      <div class="panel disclaimer-panel" id="disclaimerBox">
+        <div class="panel-head">
+          <h2>Физические эффекты и оценка точности</h2>
+          <span class="badge ok" id="disclaimerBadge">РЕЖИМ В НОРМЕ</span>
+        </div>
+        <div class="disclaimer-content" id="disclaimerText">
+          Все параметры находятся в оптимальной эксплуатационной зоне. Консоль датчика не испытывает критических вибраций, шаг сканирования обеспечивает высокую достоверность.
+        </div>
+      </div>
+
+      <!-- Лабораторная методика самостоятельной проверки точности -->
+      <div class="panel guide-panel">
+        <div class="panel-head">
+          <h2>Как самостоятельно проверить точность сканирования</h2>
+          <small>методика лабораторной поверки</small>
+        </div>
+        <div class="guide-grid">
+          <div class="guide-step">
+            <div class="step-num">1</div>
+            <div class="step-body">
+              <strong>Тест радиальной симметрии (Цилиндрический магнит)</strong>
+              <p>Установите круглый аксиальный неодимовый магнит в центр стола. Просканируйте его в режиме «Змейка». На 2D/3D карте горизонтальный срез по оси X и вертикальный по оси Y должны быть строго симметричны относительно пика. Любая асимметрия указывает на перекос штанги датчика или ошибку смещения SENSOR_OFFSET.</p>
+            </div>
+          </div>
+          <div class="guide-step">
+            <div class="step-num">2</div>
+            <div class="step-body">
+              <strong>Тест люфта ремней и повторяемости (Линейный скан)</strong>
+              <p>Выполните линейный скан одной линии слева направо, затем ту же линию справа налево. Сравните значения индукции в одинаковых точках. Расхождение кривых показывает механический люфт (backlash) ремней каретки Ender 3. В норме люфт не превышает 0.05–0.1 мм.</p>
+            </div>
+          </div>
+          <div class="guide-step">
+            <div class="step-num">3</div>
+            <div class="step-body">
+              <strong>Тест спада поля по высоте Z (Формула диполя)</strong>
+              <p>Измерьте модуль индукции над центром магнита на высотах Z = 5 мм и Z = 10 мм. Для диполя поле спадает пропорционально 1/z³. Сравните падение с формулой аксиального цилиндра: $B_z(z) = \frac{B_r}{2} [ (z+L)/\sqrt{R^2+(z+L)^2} - z/\sqrt{R^2+z^2} ]$.</p>
+            </div>
+          </div>
+          <div class="guide-step">
+            <div class="step-num">4</div>
+            <div class="step-body">
+              <strong>Контроль калибровки нуля и наводок стола</strong>
+              <p>Поднимите датчик на высоту Z = 50 мм над столом без магнита и нажмите «Сохранить ноль». При перемещении датчика над пустым столом показания |B| не должны превышать 0.01–0.03 мТл. Это гарантирует отсутствие магнитных помех от стальных винтов каретки.</p>
+            </div>
           </div>
         </div>
       </div>
@@ -1225,12 +1768,12 @@
     <div class="eyebrow">ЖИВЫЕ ДАННЫЕ</div>
     <h3>Магнитное поле</h3>
     <div class="live-field">
-      <div class="eyebrow">МОДУЛЬ |B|</div>
-      <div class="field-value"><span id="sideB">—</span> <small>µT</small></div>
+      <div class="eyebrow">МОДУЛЬ ИНДУКЦИИ |B|</div>
+      <div class="field-value"><span id="sideB">—</span> <small>мТл</small></div>
       <div class="axes">
-        <div class="axis">Bx<b id="sideBx">—</b></div>
-        <div class="axis">By<b id="sideBy">—</b></div>
-        <div class="axis">Bz<b id="sideBz">—</b></div>
+        <div class="axis">Bx (мТл)<b id="sideBx">—</b></div>
+        <div class="axis">By (мТл)<b id="sideBy">—</b></div>
+        <div class="axis">Bz (мТл)<b id="sideBz">—</b></div>
       </div>
     </div>
     <div class="eyebrow">СОСТОЯНИЕ</div>
@@ -1248,7 +1791,7 @@
   </section>
 
   <!-- Нижняя строка показывает последнее известное состояние без открытия панели. -->
-  <footer class="status"><span><i class="dot" id="statusPrinter"></i>Принтер <b id="statusPrinterText">нет связи</b></span><span><i class="dot" id="statusSensor"></i>MLX90393 <b id="statusSensorText">нет связи</b></span><span class="status-coords" id="statusCoords"><em>ДАТЧИК</em><span>X <b id="coordX">+0.00</b></span><span>Y <b id="coordY">+0.00</b></span><span>Z <b id="coordZ">0.00</b></span></span><div class="spacer"></div><span id="statusField">|B| — µT</span><span>v2.0.0</span></footer>
+  <footer class="status"><span><i class="dot" id="statusPrinter"></i>Сканер <b id="statusPrinterText">нет связи</b></span><span><i class="dot" id="statusSensor"></i>MLX90393 <b id="statusSensorText">нет связи</b></span><span class="status-coords" id="statusCoords"><em>ДАТЧИК</em><span>X <b id="coordX">+0.00</b></span><span>Y <b id="coordY">+0.00</b></span><span>Z <b id="coordZ">0.00</b></span></span><div class="spacer"></div><span id="statusField">|B| — мТл</span><span>v2.0.0</span></footer>
 </div>
 
 <script>
@@ -1271,7 +1814,34 @@ const appState={
   // `applyHardwareConfig()` данными из config.py.
   mapMinX:-96,mapMaxX:124,mapMinY:-130,mapMaxY:90,mapViewExtent:130,
   targetRelX:0,
-  targetRelY:0
+  targetRelY:0,
+  // Центр, найденный автопоиском (в системе координат измерений), и флаг
+  // использования этого смещения в следующем обычном сканировании.
+  foundCenterX:null,
+  foundCenterY:null,
+  // Готовая карта существует только для выбранного завершённого скана.
+  // dirty отделяет редкое рисование Canvas от частого опроса положения M114.
+  heatmapPoints:[],
+  heatmapScan:null,
+  heatmapDirty:true,
+  heatComponent:'b',
+  heatCanvasSize:'',
+  // Геометрия последней отрисовки нужна только для перевода наведения мыши
+  // обратно из пикселей Canvas в реальные миллиметры.
+  heatGeometry:null,
+  heatHoverPending:false,
+  heatHoverEvent:null,
+  viewMode:'2d',
+  palette:'hot',
+  wireframe3d:false,
+  camera3d:{
+    yaw:45,
+    pitch:35,
+    zoom:1.0,
+    isDragging:false,
+    lastX:0,
+    lastY:0
+  }
 };
 const $=id=>document.getElementById(id), n=v=>Number(v||0), fmt=v=>Number(v||0).toFixed(2), sgn=v=>(v>=0?'+':'')+fmt(v);
 const clamp=(value,min,max)=>Math.max(min,Math.min(max,value));
@@ -1290,8 +1860,9 @@ window.NexusApp={
       $('scanState').textContent='Готово';
       $('progressText').textContent='Сканирование завершено';
       $('startBtn').disabled=!$('safe').checked;
-      this.loadArchive();
-      this.go('results');
+      $('findBtn').disabled=false;
+      // Новый скан автоматически открывается в архиве вместе с его картой.
+      this.loadArchive(true);
     }
     if(event==='scanFailed'){
       let cancelled=/отмен/i.test(data.message);
@@ -1299,7 +1870,11 @@ window.NexusApp={
       $('scanState').textContent=cancelled?'Остановлено':'Ошибка';
       $('progressText').textContent=cancelled?'Сканирование остановлено':'Ошибка сканирования';
       $('startBtn').disabled=!$('safe').checked;
+      $('findBtn').disabled=false;
     }
+    if(event==='searchProgress')this.searchProgress(data);
+    if(event==='searchFinished')this.searchFinished(data);
+    if(event==='searchFailed')this.searchFailed(data);
     if(event==='navigate')this.go(data.page);
   },
 
@@ -1314,7 +1889,12 @@ window.NexusApp={
     if(page==='map') this.toggleConsole(true);
     $('toolName').textContent=({dashboard:'Обзор',calibration:'Калибровка',map:'Карта поля',scanning:'Сканирование',measurements:'Измерения',results:'Архив',settings:'Настройки'})[page]||'Раздел';
     if(page==='map') this.renderMap();
-    if(page==='results')this.loadArchive();
+    // При первом открытии архива загружаем сканы. После завершения скана
+    // выбранная запись уже есть в памяти, повторный запрос не нужен.
+    if(page==='results'){
+      if(!selectedScan)this.loadArchive();
+      this.renderHeatmap();
+    }
   },
 
   status(d){
@@ -1341,10 +1921,10 @@ window.NexusApp={
     // и постоянный inspector. Значения приходят от MagneticSensor.measure().
     let b=fmt(v.b);
     [['Bx',v.bx],['By',v.by],['Bz',v.bz]].forEach(([a,x])=>{
-      ['side','cal','m'].forEach(pre=>{let el=$(pre+a);if(el)el.textContent=fmt(x)+(pre==='m'?' µT':'');});
+      ['side','cal','m'].forEach(pre=>{let el=$(pre+a);if(el)el.textContent=fmt(x)+(pre==='m'?' мТл':'');});
     });
-    ['sideB','calB','dashB','mB'].forEach(id=>{let e=$(id);if(e)e.textContent=b+(id==='mB'?' µT':'');});
-    $('statusField').textContent='|B| '+b+' µT';
+    ['sideB','calB','dashB','mB'].forEach(id=>{let e=$(id);if(e)e.textContent=b+(id==='mB'?' мТл':'');});
+    $('statusField').textContent='|B| '+b+' мТл';
   },
 
   progress(d){
@@ -1486,6 +2066,257 @@ window.NexusApp={
     $('mapTargetZ').textContent=fmt(n(mapZField ? mapZField.value : 5));
   },
 
+  changeHeatComponent(){
+    // Смена Bx/By/Bz/|B| не обращается к оборудованию: используются уже
+    // сохранённые точки выбранного скана, поэтому переключение мгновенное.
+    appState.heatComponent=$('heatComponent').value;
+    appState.heatmapDirty=true;
+    this.renderHeatmap();
+  },
+
+  setHeatmap(points,scan){
+    // SQLite возвращает координаты датчика относительно центра магнита — это
+    // та же система координат, что и у рабочей карты, без дополнительных
+    // смещений и округлений.
+    appState.heatmapPoints=Array.isArray(points)?points:[];
+    appState.heatmapScan=scan||null;
+    appState.heatmapDirty=true;
+    this.renderHeatmap();
+  },
+
+  // ── Переключение режима 2D / 3D ─────────────────────────────────────────
+  setViewMode(mode){
+    appState.viewMode=mode;
+    appState.heatmapDirty=true;
+    document.querySelectorAll('.seg-btn').forEach(b=>b.classList.toggle('active',b.dataset.view===mode));
+    let hint=$('hint3D');
+    if(hint) hint.style.display=mode==='3d'?'flex':'none';
+    this.renderHeatmap();
+  },
+
+  changePalette(val){
+    appState.palette=val||'hot';
+    appState.heatmapDirty=true;
+    this.renderHeatmap();
+  },
+
+  toggle3DWireframe(){
+    appState.wireframe3d=!appState.wireframe3d;
+    appState.heatmapDirty=true;
+    this.renderHeatmap();
+  },
+
+  reset3DCamera(){
+    appState.camera3d.yaw=45;
+    appState.camera3d.pitch=35;
+    appState.camera3d.zoom=1.0;
+    appState.heatmapDirty=true;
+    this.renderHeatmap();
+  },
+
+  initCanvasEvents(){
+    let canvas=$('heatCanvas');
+    if(!canvas) return;
+    const cam=appState.camera3d;
+    canvas.addEventListener('mousedown',e=>{
+      if(appState.viewMode!=='3d') return;
+      cam.isDragging=true; cam.lastX=e.clientX; cam.lastY=e.clientY;
+    },{passive:true});
+    canvas.addEventListener('mousemove',e=>{
+      if(!cam.isDragging || appState.viewMode!=='3d') return;
+      cam.yaw  +=(e.clientX-cam.lastX)*0.55;
+      cam.pitch-=(e.clientY-cam.lastY)*0.35;
+      cam.pitch =clamp(cam.pitch,5,85);
+      cam.lastX=e.clientX; cam.lastY=e.clientY;
+      appState.heatmapDirty=true;
+      this.renderHeatmap();
+    },{passive:true});
+    window.addEventListener('mouseup',()=>{ cam.isDragging=false; },{passive:true});
+    canvas.addEventListener('wheel',e=>{
+      if(appState.viewMode!=='3d') return;
+      cam.zoom=clamp(cam.zoom*(e.deltaY<0?1.12:0.89),0.3,5.0);
+      appState.heatmapDirty=true;
+      this.renderHeatmap();
+    },{passive:true});
+    canvas.addEventListener('mousemove',ev=>{ if(appState.viewMode==='2d') this.heatHover(ev); },{passive:true});
+    canvas.addEventListener('mouseleave',()=>this.hideHeatTooltip());
+  },
+
+  // ── Рендеринг ────────────────────────────────────────────────────────────
+  heatColor(value){
+    // Делегируем HeatmapMath с активной палитрой
+    return HeatmapMath.sampleColorRgb(value, appState.palette||'hot');
+  },
+
+  renderHeatmap(){
+    // Тепловая карта корректна лишь для площадной траектории. Для окружности
+    // и линии остаются видимыми только реальные цветные точки: из них нельзя
+    // честно восстановить всё поле внутри области.
+    let canvas=$('heatCanvas'),stage=$('heatStage'),pixels=$('heatPixels'),samples=$('heatSamples');
+    if(!canvas || !stage || !pixels || !samples) return;
+    let points=appState.heatmapPoints,scan=appState.heatmapScan;
+    let width=Math.max(1,Math.round(stage.clientWidth)),height=Math.max(1,Math.round(stage.clientHeight));
+    let size=width+'x'+height;
+    if(!appState.heatmapDirty && appState.heatCanvasSize===size) return;
+    appState.heatmapDirty=false;
+    appState.heatCanvasSize=size;
+    // Canvas здесь остаётся только прозрачным приёмником наведения. Сама
+    // картинка ниже составлена из HTML-ячеек, чтобы не зависеть от GPU.
+    canvas.width=width;
+    canvas.height=height;
+    pixels.replaceChildren();
+    samples.replaceChildren();
+    let scale=$('heatScale');
+    if(!scan || points.length<2){
+      appState.heatGeometry=null;
+      scale.classList.remove('visible');
+      return;
+    }
+    let key=appState.heatComponent;
+    let values=points.map(point=>Number(point[key])).filter(Number.isFinite);
+    if(!values.length){scale.classList.remove('visible');return;}
+    let minimum=Math.min(...values),maximum=Math.max(...values);
+    // При однородном поле цвет остаётся середины шкалы, без деления на ноль.
+    let spread=Math.max(maximum-minimum,1e-9);
+    $('heatMin').textContent=fmt(minimum);
+    $('heatMax').textContent=fmt(maximum);
+    scale.classList.add('visible');
+    let isArea=scan.mode==='snake' && (scan.shape==='rectangle'||scan.shape==='cylinder');
+    // Площадной скан имеет известные физические границы. Для контура/линии
+    // берём диапазон реальных точек и добавляем небольшой отступ по краям.
+    let minX,maxX,minY,maxY;
+    if(isArea){
+      maxX=Number(scan.size_x)/2; minX=-maxX;
+      maxY=Number(scan.size_y)/2; minY=-maxY;
+    }else{
+      minX=Math.min(...points.map(point=>Number(point.x)));
+      maxX=Math.max(...points.map(point=>Number(point.x)));
+      minY=Math.min(...points.map(point=>Number(point.y)));
+      maxY=Math.max(...points.map(point=>Number(point.y)));
+      let padding=Math.max(2,Math.max(maxX-minX,maxY-minY)*.08);
+      if(maxX-minX<1e-6){minX-=padding;maxX+=padding;}else{minX-=padding;maxX+=padding;}
+      if(maxY-minY<1e-6){minY-=padding;maxY+=padding;}else{minY-=padding;maxY+=padding;}
+    }
+    // Масштаб осей обязан быть единым: иначе круглый магнит на широком Canvas
+    // превращается в овал. Оставшееся место по краям — намеренное поле карты,
+    // а не растяжение измерений.
+    let geometry=HeatmapMath.equalScaleGeometry(minX,maxX,minY,maxY,width,height);
+    let {pixelsPerMillimetre,offsetX,offsetY,drawingWidth,drawingHeight}=geometry;
+    let toPixelX=x=>offsetX+(x-minX)*pixelsPerMillimetre;
+    let toPixelY=y=>offsetY+(maxY-y)*pixelsPerMillimetre;
+    appState.heatGeometry={...geometry,isArea,key,minimum,maximum,scan};
+    if(isArea){
+      // IDW (inverse distance weighting): в каждом пикселе считаем среднее
+      // измерений с весом 1/r². Близкая точка влияет сильнее далёкой, а в
+      // самой измеренной точке значение передаётся без изменения.
+      // Не более 56×56 элементов: этого достаточно для плавной 2D-карты,
+      // но не создаёт тяжёлое дерево DOM на Raspberry Pi.
+      let grid=Math.min(56,Math.max(36,Math.round(Math.sqrt(points.length)*7)));
+      pixels.style.left=offsetX+'px';
+      pixels.style.top=offsetY+'px';
+      pixels.style.width=drawingWidth+'px';
+      pixels.style.height=drawingHeight+'px';
+      pixels.style.gridTemplateColumns='repeat('+grid+', 1fr)';
+      pixels.style.gridTemplateRows='repeat('+grid+', 1fr)';
+      let fragment=document.createDocumentFragment();
+      let halfX=Number(scan.size_x)/2,halfY=Number(scan.size_y)/2;
+      for(let gy=0;gy<grid;gy++) for(let gx=0;gx<grid;gx++){
+        let x=minX+(gx+.5)/grid*(maxX-minX),y=maxY-(gy+.5)/grid*(maxY-minY);
+        let cell=document.createElement('i');
+        cell.className='heat-pixel';
+        if(scan.shape!=='cylinder' || HeatmapMath.insideCylinder(x,y,halfX)){
+          let normalized=(HeatmapMath.interpolate(points,key,x,y)-minimum)/spread;
+          cell.style.backgroundColor=this.heatColor(normalized);
+        }
+        fragment.appendChild(cell);
+      }
+      pixels.appendChild(fragment);
+    }
+    // Поверх интерполяции всегда показываем исходные точки. Это отделяет
+    // реальное измерение от математического приближения и полезно для
+    // контурного/линейного режима, где карта площади не строится.
+    let sampleFragment=document.createDocumentFragment();
+    points.forEach(point=>{
+      let normalized=(Number(point[key])-minimum)/spread;
+      let sample=document.createElement('i');
+      sample.className='heat-sample';
+      sample.style.left=toPixelX(Number(point.x))+'px';
+      sample.style.top=toPixelY(Number(point.y))+'px';
+      sample.style.backgroundColor=this.heatColor(normalized);
+      sampleFragment.appendChild(sample);
+    });
+    samples.appendChild(sampleFragment);
+
+    // Отрисовка найденных границ и центра магнита на Canvas
+    let ctx=canvas.getContext('2d');
+    if(ctx){
+      ctx.clearRect(0,0,width,height);
+      let geom=appState.foundGeometry;
+      if(geom && geom.center_x!=null && geom.center_y!=null){
+        let cx=toPixelX(Number(geom.center_x)), cy=toPixelY(Number(geom.center_y));
+        ctx.save();
+        ctx.setLineDash([5, 4]);
+        ctx.lineWidth=2;
+        ctx.strokeStyle='#00e5ff'; // Неоновый циан
+        if(geom.pattern==='circle' && geom.radius){
+          let rPx=geom.radius*pixelsPerMillimetre;
+          ctx.beginPath();
+          ctx.arc(cx, cy, rPx, 0, Math.PI*2);
+          ctx.stroke();
+        }else if(geom.bounds){
+          let bx1=toPixelX(Number(geom.bounds.x_min)), by1=toPixelY(Number(geom.bounds.y_max));
+          let bx2=toPixelX(Number(geom.bounds.x_max)), by2=toPixelY(Number(geom.bounds.y_min));
+          ctx.strokeRect(Math.min(bx1,bx2), Math.min(by1,by2), Math.abs(bx2-bx1), Math.abs(by2-by1));
+        }
+        // Перекрестие центра
+        ctx.setLineDash([]);
+        ctx.strokeStyle='#ffea00';
+        ctx.lineWidth=1.5;
+        ctx.beginPath();
+        ctx.moveTo(cx-10, cy); ctx.lineTo(cx+10, cy);
+        ctx.moveTo(cx, cy-10); ctx.lineTo(cx, cy+10);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(cx, cy, 3, 0, Math.PI*2);
+        ctx.fillStyle='#ffea00';
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+  },
+
+  heatHover(event){
+    // Обрабатываем максимум один hover-кадр за отрисовку браузера: при
+    // быстром движении курсора не выполняем IDW сотни раз за один кадр.
+    appState.heatHoverEvent={x:event.offsetX,y:event.offsetY};
+    if(appState.heatHoverPending) return;
+    appState.heatHoverPending=true;
+    requestAnimationFrame(()=>{
+      appState.heatHoverPending=false;
+      let geometry=appState.heatGeometry,point=appState.heatHoverEvent,tooltip=$('heatTooltip');
+      if(!geometry || !point){this.hideHeatTooltip();return;}
+      let x=geometry.minX+(point.x-geometry.offsetX)/geometry.pixelsPerMillimetre;
+      let y=geometry.maxY-(point.y-geometry.offsetY)/geometry.pixelsPerMillimetre;
+      if(x<geometry.minX || x>geometry.maxX || y<geometry.minY || y>geometry.maxY ||
+         (geometry.scan.shape==='cylinder' && !HeatmapMath.insideCylinder(x,y,Number(geometry.scan.size_x)/2))){
+        this.hideHeatTooltip();
+        return;
+      }
+      let value=HeatmapMath.interpolate(appState.heatmapPoints,geometry.key,x,y);
+      if(!Number.isFinite(value)){this.hideHeatTooltip();return;}
+      let label = geometry.key==='b' ? 'Модуль |B|' : 'Индукция B' + geometry.key.slice(1);
+      tooltip.textContent=label+': '+fmt(value)+' мТл · X '+sgn(x)+' · Y '+sgn(y);
+      tooltip.style.left=Math.min(point.x+14,$('heatStage').clientWidth-tooltip.offsetWidth-8)+'px';
+      tooltip.style.top=Math.min(point.y+14,$('heatStage').clientHeight-tooltip.offsetHeight-8)+'px';
+      tooltip.classList.add('visible');
+    });
+  },
+
+  hideHeatTooltip(){
+    let tooltip=$('heatTooltip');
+    if(tooltip)tooltip.classList.remove('visible');
+  },
+
   mapClick(event){
     // Переводим пиксель клика в миллиметры симметричной шкалы карты.
     let stage=$('mapStage');
@@ -1619,8 +2450,118 @@ window.NexusApp={
       }
     }
     $('pointEstimate').textContent=count;
-    $('timeEstimate').textContent=Math.ceil(count*.75)+' с';
+    $('timeEstimate').textContent=Math.ceil(count*.42)+' с';
     $('zEstimate').textContent=(n($('height').value)+5).toFixed(1)+' мм';
+  },
+
+  findCenter(){
+    // Быстрый поиск центра и границ магнита с распознаванием формы
+    if(!appState.printerConnected){
+      this.log('WARNING','Подключите принтер перед автопоиском центра');
+      return;
+    }
+    if(!appState.printerHomed){
+      this.log('WARNING','Сначала выполните калибровку принтера G28');
+      return;
+    }
+    if(!appState.sensorConnected){
+      this.log('WARNING','Датчик не подключён: автопоиск невозможен');
+      return;
+    }
+    let pattern=$('magnetPattern')?$('magnetPattern').value:'auto';
+    let fast=$('fastSearch')?$('fastSearch').checked:true;
+    let payload={
+      height:n($('height').value),
+      pattern:pattern,
+      fast:fast
+    };
+    $('findBtn').disabled=true;
+    $('startBtn').disabled=true;
+    $('scanState').textContent='Поиск центра';
+    $('progressText').textContent=fast?'Быстрый поиск по осям (5–10 с)…':'Подготовка автопоиска…';
+    $('progressPct').textContent='0%';
+    $('progressBar').style.width='0%';
+    $('findResult').textContent='Идёт высокоскоростной анализ по осям X/Y…';
+    $('findResult').classList.remove('ok');
+    if($('moveCenterBlock'))$('moveCenterBlock').style.display='none';
+    bridge.startSearch(JSON.stringify(payload));
+  },
+
+  moveToFoundCenter(){
+    if(appState.foundCenterX!=null && appState.foundCenterY!=null){
+      this.log('INFO','Перемещение сопла над центром магнита: X '+sgn(appState.foundCenterX)+' · Y '+sgn(appState.foundCenterY));
+      bridge.moveToCenter(appState.foundCenterX, appState.foundCenterY);
+    }
+  },
+
+  searchProgress(d){
+    let label={
+      axis_explore:'Оценка осей',
+      axis_x:'Движение по оси X',
+      axis_y:'Движение по оси Y',
+      refine:'Уточнение пика',
+      perimeter:'Поиск периметра',
+      center_approach:'Выход над центром',
+      height_detect:'Определение высоты магнита',
+      verify:'Замер с зазором 5 мм',
+      coarse:'Грубый поиск',
+      fine:'Уточнение центра',
+      test:'Контрольные измерения'
+    }[d.stage]||'Автопоиск';
+    let pct=d.total?Math.min(100, d.point/d.total*100):0;
+    $('progressBar').style.width=pct+'%';
+    $('progressText').textContent=label+': точка '+d.point+' / '+d.total;
+    $('progressPct').textContent=pct.toFixed(0)+'%';
+    $('scanState').textContent='Поиск центра';
+    this.position({x:d.value.printer_x,y:d.value.printer_y,z:d.value.z});
+  },
+
+  searchFinished(d){
+    if(d.detected_surface_z!=null && $('height')){
+      $('height').value=d.detected_surface_z.toFixed(1);
+    }
+    let shapeDesc='';
+    if(d.pattern==='circle'){
+      let diam=d.diameter||(d.radius?d.radius*2:0);
+      shapeDesc=' · Круг (Ø '+diam.toFixed(1)+' мм)';
+    }else if(d.pattern==='rectangle'){
+      shapeDesc=' · Прямоугольник ('+d.width.toFixed(1)+'×'+d.length.toFixed(1)+' мм)';
+    }
+    let heightDesc=d.detected_surface_z!=null?' · H '+d.detected_surface_z.toFixed(1)+' мм (зазор Z='+d.work_z.toFixed(1)+' мм)':'';
+    let durStr=d.duration_sec?' ['+d.duration_sec+' с]':'';
+    let resultMsg='Центр: X '+sgn(d.center_x)+' · Y '+sgn(d.center_y)+' мм'+shapeDesc+heightDesc+' · |B| '+fmt(d.peak_b)+' мТл'+durStr;
+
+    this.log('SUCCESS',resultMsg);
+
+    $('scanState').textContent='Центр найден';
+    $('progressText').textContent='Автопоиск завершён'+durStr;
+    $('progressBar').style.width='100%';
+    $('progressPct').textContent='100%';
+    $('findResult').textContent=resultMsg;
+    $('findResult').classList.add('ok');
+    $('findBtn').disabled=false;
+    $('startBtn').disabled=!$('safe').checked;
+    appState.foundCenterX=d.center_x;
+    appState.foundCenterY=d.center_y;
+    appState.foundGeometry=d;
+    appState.heatmapDirty=true;
+    this.renderHeatmap();
+    if($('moveCenterBlock'))$('moveCenterBlock').style.display='block';
+  },
+
+  searchFailed(d){
+    let cancelled=/отмен/i.test(d.message);
+    this.log(cancelled?'WARNING':'ERROR',d.message);
+    $('scanState').textContent=cancelled?'Остановлено':'Ошибка';
+    $('progressText').textContent=cancelled?'Автопоиск остановлен':'Ошибка автопоиска';
+    $('findResult').textContent='Центр магнита не определён';
+    $('findResult').classList.remove('ok');
+    $('findBtn').disabled=false;
+    $('startBtn').disabled=!$('safe').checked;
+    if(cancelled){
+      $('progressBar').style.width='0%';
+      $('progressPct').textContent='0%';
+    }
   },
 
   safety(){$('startBtn').disabled=!$('safe').checked;},
@@ -1651,7 +2592,14 @@ window.NexusApp={
       end_x:n($('endX').value),
       end_y:n($('endY').value)
     };
+    // Если автопоиск нашёл центр и пользователь включил чекбокс — добавляем
+    // смещение: обычный скан пойдёт вокруг реального полюса магнита.
+    if($('centerScan').checked && appState.foundCenterX!=null && appState.foundCenterY!=null){
+      p.center_x=appState.foundCenterX;
+      p.center_y=appState.foundCenterY;
+    }
     $('startBtn').disabled=true;
+    $('findBtn').disabled=true;
     $('scanState').textContent='Подготовка';
     $('progressText').textContent='Подготовка траектории';
     $('progressPct').textContent='0%';
@@ -1659,13 +2607,16 @@ window.NexusApp={
     bridge.startScan(JSON.stringify(p));
   },
 
-  loadArchive(){
+  loadArchive(openLatestResult=false){
     // QWebChannel возвращает JSON строкой: SQLite остаётся в Python-потоке.
     bridge.archive(raw=>{
       let scans=JSON.parse(raw), body=$('scanRows');
       body.innerHTML='';
       if(!scans.length){
-        body.innerHTML='<tr><td colspan="6" class="empty">Архив пока пуст</td></tr>';
+        selectedScan=null; selectedPoints=[];
+        $('pointRows').innerHTML='';
+        $('pointCaption').textContent='Выберите скан';
+        body.innerHTML='<tr><td colspan="7" class="empty">Архив пока пуст</td></tr>';
         return;
       }
       scans.forEach(s=>{
@@ -1676,15 +2627,39 @@ window.NexusApp={
           :s.shape==='rectangle'
           ?s.size_x.toFixed(1)+' × '+s.size_y.toFixed(1)+' мм'
           :'Линия '+s.size_x.toFixed(1)+' мм';
-        tr.innerHTML='<td>'+s.created_at.replace('T',' ')+'</td><td>'+shapeLabel+'</td><td>'+size+'</td><td>'+s.step.toFixed(2)+' мм</td><td>'+s.point_count+'</td><td>'+s.filename+'</td>';
+        tr.innerHTML='<td>'+s.created_at.replace('T',' ')+'</td><td>'+shapeLabel+'</td><td>'+size+'</td><td>'+s.step.toFixed(2)+' мм</td><td>'+s.point_count+'</td><td>'+s.filename+'</td><td><button class="button danger archive-delete" title="Удалить измерение" onclick="event.stopPropagation();NexusApp.deleteScan('+s.id+')">Удалить</button></td>';
         tr.onclick=()=>this.selectScan(s,tr);
         body.appendChild(tr);
       });
-      this.selectScan(scans[0],body.firstChild);
+      this.selectScan(scans[0],body.firstChild,openLatestResult);
     });
   },
 
-  selectScan(s,row){
+  deleteScan(id){
+    let scanId=Number(id);
+    if(!Number.isInteger(scanId) || scanId<=0) return;
+    if(!confirm('Удалить это измерение, его точки и CSV-файл?')) return;
+    bridge.deleteScan(scanId,raw=>{
+      let result;
+      try{ result=JSON.parse(raw); }catch(error){
+        this.log('ERROR','Не удалось разобрать ответ удаления');
+        return;
+      }
+      if(!result.ok){
+        this.log('ERROR',result.message||'Измерение не найдено');
+        return;
+      }
+      if(selectedScan && selectedScan.id===scanId){
+        selectedScan=null; selectedPoints=[]; appState.heatmapPoints=[]; appState.heatmapScan=null;
+        $('pointRows').innerHTML=''; $('pointCaption').textContent='Выберите скан';
+        appState.heatmapDirty=true; this.renderHeatmap();
+      }
+      this.log('SUCCESS',result.removed_file?'Измерение и CSV удалены':'Измерение удалено; CSV-файл не найден');
+      this.loadArchive();
+    });
+  },
+
+  selectScan(s,row,openResult=false){
     // Подсвечиваем выбранный скан и запрашиваем только его точки из SQLite.
     document.querySelectorAll('#scanRows tr').forEach(x=>x.classList.remove('selected'));
     row.classList.add('selected');
@@ -1694,6 +2669,8 @@ window.NexusApp={
       $('pointCaption').textContent=selectedPoints.length+' точек · '+s.filename;
       let body=$('pointRows');
       body.innerHTML=selectedPoints.map(p=>'<tr><td>'+p.point_no+'</td><td>'+fmt(p.x)+'</td><td>'+fmt(p.y)+'</td><td>'+fmt(p.z)+'</td><td>'+fmt(p.bx)+'</td><td>'+fmt(p.by)+'</td><td>'+fmt(p.bz)+'</td><td>'+fmt(p.b)+'</td></tr>').join('');
+      this.setHeatmap(selectedPoints,s);
+      if(openResult)this.go('results');
     });
   }
 };

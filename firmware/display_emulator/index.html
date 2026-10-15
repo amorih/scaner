@@ -1,0 +1,452 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>MAG Scanner — эмулятор дисплея</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b1110;
+      --panel: #121b19;
+      --edge: #2a3935;
+      --lcd: #9fca84;
+      --pixel: #102416;
+      --accent: #71e6ad;
+      --muted: #91a49e;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background:
+        radial-gradient(circle at 50% 0%, #1b3029 0, transparent 42%),
+        linear-gradient(145deg, #080c0b, var(--bg));
+      color: #e7f2ee;
+      font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+    main { width: min(1040px, 100%); }
+    header { margin-bottom: 20px; }
+    h1 { margin: 0 0 5px; font-size: clamp(24px, 4vw, 38px); letter-spacing: -.03em; }
+    header p { margin: 0; color: var(--muted); }
+    .workspace { display: grid; grid-template-columns: minmax(0, 1fr) 310px; gap: 18px; }
+    .printer, .panel {
+      border: 1px solid var(--edge);
+      border-radius: 24px;
+      background: color-mix(in srgb, var(--panel) 94%, transparent);
+      box-shadow: 0 28px 70px #0008;
+    }
+    .printer { min-height: 500px; display: grid; place-items: center; padding: 34px; }
+    .bezel {
+      width: min(100%, 690px);
+      padding: 28px 28px 30px;
+      border: 1px solid #46514e;
+      border-radius: 22px;
+      background: linear-gradient(145deg, #303836, #171c1b 58%, #101413);
+      box-shadow: inset 0 2px 1px #ffffff18, inset 0 -4px 8px #0008, 0 22px 40px #0008;
+    }
+    .brand { display: flex; justify-content: space-between; margin: 0 6px 16px; color: #aeb8b5; font-weight: 700; letter-spacing: .14em; font-size: 11px; }
+    .display-row { display: grid; grid-template-columns: minmax(0, 1fr) 104px; gap: 24px; align-items: center; }
+    .screen-shell {
+      padding: 14px;
+      border-radius: 10px;
+      background: #080b0a;
+      border: 1px solid #48524f;
+      box-shadow: inset 0 0 14px #000;
+    }
+    canvas {
+      width: 100%;
+      aspect-ratio: 2 / 1;
+      display: block;
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+      background: var(--lcd);
+      box-shadow: 0 0 28px #b3ff9a28, inset 0 0 14px #19331c40;
+    }
+    .encoder { display: grid; justify-items: center; gap: 12px; }
+    .knob {
+      width: 82px; height: 82px; border-radius: 50%; border: 1px solid #56615e;
+      background: radial-gradient(circle at 37% 32%, #505957 0 8%, #2b3230 38%, #101312 72%);
+      box-shadow: inset 0 0 0 8px #222826, inset -7px -7px 14px #0008, 0 10px 24px #0008;
+      cursor: pointer; position: relative;
+    }
+    .knob::after { content: ""; position: absolute; width: 3px; height: 17px; border-radius: 2px; background: #b8c3bf; left: 39px; top: 7px; box-shadow: 0 0 5px #fff5; }
+    .knob:active { transform: scale(.97); }
+    .encoder small { color: #909b97; text-align: center; }
+    .wheel-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; width: 100%; }
+    button, select, input { font: inherit; }
+    button, select {
+      color: #eafff6; background: #1c2825; border: 1px solid #354742; border-radius: 11px;
+      min-height: 40px; padding: 8px 12px; cursor: pointer;
+    }
+    button:hover { border-color: var(--accent); background: #243630; }
+    button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .panel { padding: 20px; }
+    .panel h2 { font-size: 15px; margin: 0 0 16px; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }
+    .field { margin: 0 0 17px; }
+    .field label { display: flex; justify-content: space-between; margin-bottom: 7px; color: #c0cfca; }
+    .field output { color: var(--accent); font-variant-numeric: tabular-nums; }
+    select, input[type="range"] { width: 100%; }
+    input[type="range"] { accent-color: var(--accent); }
+    .state-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .state-buttons button.active { color: #07130d; background: var(--accent); border-color: var(--accent); font-weight: 700; }
+    .wide { width: 100%; margin-top: 9px; }
+    .tip { margin: 18px 0 0; padding-top: 15px; border-top: 1px solid var(--edge); color: var(--muted); font-size: 13px; }
+    kbd { padding: 2px 6px; border: 1px solid #465752; border-bottom-width: 2px; border-radius: 5px; background: #18211f; color: #d7e5e0; }
+    .badge { display: inline-flex; align-items: center; gap: 7px; margin-top: 12px; padding: 6px 10px; border-radius: 999px; color: #9eb0aa; background: #0c1211; border: 1px solid #283531; font-size: 12px; }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 7px var(--accent); }
+    @media (max-width: 820px) {
+      .workspace { grid-template-columns: 1fr; }
+      .printer { min-height: auto; padding: 18px; }
+      .display-row { grid-template-columns: 1fr; }
+      .encoder { grid-template-columns: auto 130px; justify-content: center; }
+      .encoder small { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>MAG Scanner — эмулятор 128×64</h1>
+      <p>Точный размер экрана Ender 3. Здесь можно проверить интерфейс до сборки и записи прошивки.</p>
+      <span class="badge"><span class="dot"></span> Локальный эмулятор — принтер и SD-карта не затрагиваются</span>
+    </header>
+
+    <div class="workspace">
+      <section class="printer" aria-label="Эмулятор панели принтера">
+        <div class="bezel">
+          <div class="brand"><span>MAG SCANNER</span><span>128 × 64</span></div>
+          <div class="display-row">
+            <div class="screen-shell"><canvas id="lcd" width="128" height="64" aria-label="Эмуляция дисплея"></canvas></div>
+            <div class="encoder">
+              <button class="knob" id="press" title="Нажать колесо" aria-label="Нажать колесо"></button>
+              <small>Нажми для<br>действий</small>
+              <div class="wheel-buttons">
+                <button id="prev" title="Колесо влево">◀</button>
+                <button id="next" title="Колесо вправо">▶</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <aside class="panel">
+        <h2>Сценарий проверки</h2>
+        <div class="field">
+          <label for="page">Экран <output id="pageNumber">1 / 7</output></label>
+          <select id="page">
+            <option value="0">Главный</option>
+            <option value="1">Поле</option>
+            <option value="2">Вектор XYZ</option>
+            <option value="3">Сканирование</option>
+            <option value="4">Позиция</option>
+            <option value="5">Система</option>
+            <option value="6">Отчёт</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Состояние</label>
+          <div class="state-buttons" id="states">
+            <button data-state="idle" class="active">Ожидание</button>
+            <button data-state="scan">Сканирование</button>
+            <button data-state="calc">Расчёт</button>
+            <button data-state="done">Готово</button>
+            <button data-state="error">Ошибка</button>
+          </div>
+        </div>
+        <div class="field">
+          <label for="progress">Прогресс <output id="progressValue">42%</output></label>
+          <input id="progress" type="range" min="0" max="100" value="42">
+        </div>
+        <div class="field">
+          <label for="fieldStrength">Магнитное поле <output id="fieldValue">184 mT</output></label>
+          <input id="fieldStrength" type="range" min="0" max="999" value="184">
+        </div>
+        <button id="boot" class="wide">Показать загрузочную анимацию</button>
+        <p class="tip">Вращай виртуальное колесо или клавиши <kbd>←</kbd> <kbd>→</kbd>. Нажатие колеса или <kbd>Enter</kbd> открывает действия текущего экрана.</p>
+      </aside>
+    </div>
+  </main>
+
+  <script>
+    "use strict";
+
+    const canvas = document.querySelector("#lcd");
+    const ctx = canvas.getContext("2d", { alpha: false });
+    const LCD = "#9fca84", PIXEL = "#102416";
+    const pages = ["HOME", "FIELD", "VECTOR", "SCAN", "POSITION", "SYSTEM", "REPORT"];
+    const state = { page: 0, mode: "idle", progress: 42, field: 184, frame: 0, overlay: false, boot: true, bootAt: performance.now(), walkX: 60, walkDir: 1, walkTick: 0 };
+
+    // Оригинальные кадры 32x32, созданные специально для проекта.
+    const spriteHex = {
+      idle: [
+        "0000000000000000001C1C00003E3E00003FFE00007FFF00007FFF00007007000077F7000077F70000700700003FFE00001EDC00000FF8000003E000000FE00000FFFE0003FFFF8003F83F8003F01F8003F01F8003F01F8001F83F0000FFFE00007FFC0000DFEC000FDFEFC00FDFEFC0003FF000000000000000000000000000",
+        "0000000000000000001C1C00003E3E00003FFE00007FFF00007FFF0000700700007417000070070000700700003FFE00001EDC00000FF8000003E000000FE00000FFFE0003FFFF8003F83F8003F01F8003F01F8003F01F8001F83F0000FFFE00007FFC0000DFEC000FDFEFC00FDFEFC0003FF000000000000000000000000000"
+      ],
+      scan: [
+        "0000000000000004001C1C04003E3E04003FFE04007FFF04007FFF0400700704007637040077F71F00700700003FFE04001EDC04000FF8040003E004000FE00400FFFE0403FFFF8403F83FCC03F01FFC03F01FFC03F01F9C01F83F0400FFFE00007FFC0000DFEC000FDFEFC00FDFEFC0003FF000000000000000000000000000",
+        "0000000000000004001C1C0E003E3E04003FFE04007FFF04007FFF0400700704007637040075D71F00700700003FFE04001EDC04000FF8040003E004000FE00400FFFE0403FFFF8403F83FCC03F01FFC03F01FFC03F01F9C01F83F0400FFFE00007FFC0000DFEC000FDFEFC00FDFEFC0003FF000000000000000000000000000"
+      ],
+      done: [
+        "00000000000000000C1C1C0C1E3E3E1E0C7FFC18007FFF00007FFF0000763700007637000076370000700700003FFE00001EDC00000FF8000003E0003C0FE03C3F3FFF9E3FFFFFFE3F3F83F8001F80FC001F80FC001F80FC000FC1F80007FFF00003FFE00006FF600007EFF7E007EFF7E0001FF80000000000000000000000000",
+        "000000003800001C001C1C00003E3E00007FFC00007FFF00007FFF0000763700007637000076370000700700003FFE00001EDC00000FF8000003E0003C0FE03C3F3FFF9E3FFFFFFE3F3F83F8001F80FC001F80FC001F80FC000FC1F80007FFF00003FFE00006FF600007EFF7E007EFF7E0001FF80000000000000000000000000"
+      ],
+      error: [
+        "0000000000000000001C1C00003E3E00003FFE00007FFF00007FFF0000700700007227000073670000700700003FFE00001EDC00000FF8000003E000000FE00000FFFE0403FFFF8403F83F8403F01F8403F01F8403F01F8001F83F0400FFFE00007FFC0000DFEC000FDFEFC00FDFEFC0003FF000000000000000000000000000",
+        "0000000000000000001C1C00003E3E00003FFE00007FFF00007FFF0000700700007227000073670000700700003FFE00001EDC00000FF8000003E000000FE00000FFFE0E03FFFF8E03F83F8E03F01F8E03F01F8E03F01F8001F83F0E00FFFE00007FFC0000DFEC000FDFEFC00FDFEFC0003FF000000000000000000000000000"
+      ]
+    };
+
+    const FONT = {
+      " ":"00000000000000000000000000000000000", "!":"00100001000010000100000000010000000",
+      "%":"11001110010001000100010011100110011", "+":"00000001000010011111001000010000000",
+      "-":"00000000000000011111000000000000000", ".":"00000000000000000000000000011000110",
+      "/":"00001000100001000100010001000100000", ":":"00000011000110000000011000110000000",
+      "<":"00010001000100010000001000010000010", ">":"01000001000001000001001000100001000",
+      "0":"01110100011001110101110011000101110", "1":"00100011000010000100001000010001110",
+      "2":"01110100010000100010001000100011111", "3":"11110000010000101110000010000111110",
+      "4":"00010001100101010010111110001000010", "5":"11111100001111000001000011000101110",
+      "6":"00110010001000011110100011000101110", "7":"11111000010001000100010000100001000",
+      "8":"01110100011000101110100011000101110", "9":"01110100011000101111000010001001100",
+      "A":"01110100011000111111100011000110001", "B":"11110100011000111110100011000111110",
+      "C":"01111100001000010000100001000001111", "D":"11110100011000110001100011000111110",
+      "E":"11111100001000011110100001000011111", "F":"11111100001000011110100001000010000",
+      "G":"01111100001000010111100011000101111", "H":"10001100011000111111100011000110001",
+      "I":"01110001000010000100001000010001110", "J":"00111000100001000010100101001001100",
+      "K":"10001100101010011000101001001010001", "L":"10000100001000010000100001000011111",
+      "M":"10001110111010110101100011000110001", "N":"10001110011010110011100011000110001",
+      "O":"01110100011000110001100011000101110", "P":"11110100011000111110100001000010000",
+      "Q":"01110100011000110001101011001001101", "R":"11110100011000111110101001001010001",
+      "S":"01111100001000001110000010000111110", "T":"11111001000010000100001000010000100",
+      "U":"10001100011000110001100011000101110", "V":"10001100011000110001100010101000100",
+      "W":"10001100011000110101101011010101010", "X":"10001100010101000100010101000110001",
+      "Y":"10001100010101000100001000010000100", "Z":"11111000010001000100010001000011111",
+      "m":"00000000001010110101101011010110101", "T":"11111001000010000100001000010000100"
+    };
+
+    function clear() { ctx.fillStyle = LCD; ctx.fillRect(0, 0, 128, 64); ctx.fillStyle = PIXEL; }
+    function px(x, y, w = 1, h = 1) { ctx.fillRect(Math.round(x), Math.round(y), Math.round(w), Math.round(h)); }
+    function line(x0, y0, x1, y1) {
+      x0|=0; y0|=0; x1|=0; y1|=0;
+      const dx=Math.abs(x1-x0), sx=x0<x1?1:-1, dy=-Math.abs(y1-y0), sy=y0<y1?1:-1;
+      let err=dx+dy;
+      while (true) { px(x0,y0); if (x0===x1 && y0===y1) break; const e2=2*err; if(e2>=dy){err+=dy;x0+=sx;} if(e2<=dx){err+=dx;y0+=sy;} }
+    }
+    function rect(x,y,w,h,fill=false) { fill ? px(x,y,w,h) : (line(x,y,x+w-1,y),line(x,y+h-1,x+w-1,y+h-1),line(x,y,x,y+h-1),line(x+w-1,y,x+w-1,y+h-1)); }
+    function text(value, x, y, scale=1) {
+      let cx=x;
+      for (const raw of String(value)) {
+        // Fallback to uppercase if exact char not found
+        const charCode = FONT[raw] || FONT[raw.toUpperCase()] || FONT[" "];
+        for(let row=0;row<7;row++) for(let col=0;col<5;col++) if(charCode[row*5+col]==="1") px(cx+col*scale,y+row*scale,scale,scale);
+        cx += 6*scale;
+      }
+    }
+    function centerText(value,y,scale=1){ text(value,Math.max(0,Math.floor((128-(String(value).length*6-1)*scale)/2)),y,scale); }
+    function bitmap(hex,x,y) {
+      for(let row=0;row<32;row++) for(let byte=0;byte<4;byte++) {
+        const value=parseInt(hex.slice((row*4+byte)*2,(row*4+byte)*2+2),16);
+        for(let bit=0;bit<8;bit++) if(value & (0x80>>bit)) px(x+byte*8+bit,y+row);
+      }
+    }
+    function koala(x,y,kind=state.mode) {
+      // calc использует scan-спрайт как базу (коала в движении) + поверх тетрадь
+      const spriteKind = spriteHex[kind] ? kind : (kind === "calc" ? "scan" : "idle");
+      bitmap(spriteHex[spriteKind][state.frame],x,y);
+      if (kind === "idle") magnetGame(x,y);
+      if (kind === "calc") notebook(x,y);
+    }
+    function magnet(x,y,flip=false) {
+      // Маленький U-магнит с отмеченными полюсами.
+      if (!flip) {
+        px(x,y,2,6); px(x+6,y,2,6); px(x+1,y+5,6,2);
+        px(x,y,3,2); px(x+5,y,3,2);
+      } else {
+        px(x,y+1,6,2); px(x,y+7,6,2); px(x,y+2,2,6);
+        px(x+4,y,2,3); px(x+4,y+6,2,3);
+      }
+    }
+    function magnetGame(x,y) {
+      // Магниты меняют высоту и ориентацию: коала как будто жонглирует ими.
+      if (state.frame === 0) { magnet(x,y+21); magnet(x+24,y+13,true); }
+      else { magnet(x+1,y+13,true); magnet(x+24,y+22); }
+      line(x+9,y+26,x+11,y+24); line(x+21,y+24,x+23,y+26);
+    }
+    function formatField(val) { return (val/100).toFixed(2); }
+
+    function avatarCard(mode, x=1, y=12) {
+      rect(x, y, 36, 38);
+      koala(x+2, y+3, mode);
+    }
+    
+    function header(title, pageIdx){ 
+      rect(0, 0, 128, 11, true); // Inverted bar
+      ctx.fillStyle = LCD;
+      text("[MAG-SCAN]", 2, 2);
+      text(title, 55, 2);
+      text(`${pageIdx+1}/7`, 110, 2);
+      ctx.fillStyle = PIXEL;
+    }
+    
+    function footer(label){ 
+      line(0, 57, 127, 57);
+      text(label, 2, 59);
+    }
+    
+    function progressBar(x, y, w, value){ 
+      rect(x, y, w, 6); 
+      const fill = Math.max(0, Math.min(w-4, Math.round((w-4)*value/100))); 
+      if(fill) px(x+2, y+2, fill, 2); 
+    }
+    
+    function modeLabel(){ 
+      return state.mode==="idle"?"READY":state.mode==="scan"?"SCANNING":state.mode==="calc"?"CALC...":state.mode==="done"?"DONE":"ALARM!"; 
+    }
+
+    
+    function drawHome(){
+      header("HOME", state.page);
+      avatarCard("idle", 1, 13);
+      
+      // Right info panel (x=41..126)
+      const st = modeLabel();
+      text(`[${st}]`, 42, 14);
+      
+      text(`${formatField(state.field)} mT`, 42, 25, 2);
+      
+      const sub = state.mode==="scan" ? `PT 042/100` : "SENSOR [OK]";
+      text(sub, 42, 42);
+      
+      progressBar(42, 49, 83, state.progress);
+      footer("ENC: TURN PAGE " + String.fromCharCode(183) + " CLICK: MENU");
+    }
+
+    function drawField(){
+      header("FIELD", state.page);
+      
+      // Radar/Target
+      rect(3, 13, 34, 34);
+      line(20, 15, 20, 45); line(5, 30, 35, 30);
+      const r = Math.min(16, Math.max(2, Math.round(state.field/100)));
+      for(let i=3; i<=15; i+=4) { rect(20-i, 30-i, i*2, i*2); }
+      if(state.frame) px(20-r, 30-r, r*2, r*2);
+      
+      text("TOTAL POWER", 42, 14);
+      text(`${formatField(state.field)} mT`, 42, 24, 2);
+      text(`PEAK: ${formatField(state.field*1.5)} mT`, 42, 43);
+      
+      footer("ENC: TURN PAGE " + String.fromCharCode(183) + " CLICK: MENU");
+    }
+    
+    function drawVector(){
+      header("VECTOR", state.page);
+      const vals=[120,-45,210], labels=["X","Y","Z"];
+      vals.forEach((v,i)=>{ 
+        const y=14+i*13; 
+        text(`${labels[i]}:`, 3, y); 
+        rect(17, y, 64, 8);
+        line(49, y+1, 49, y+6);
+        const len = Math.min(31, Math.abs(v/10)); 
+        if(len > 0) {
+          if (v >= 0) px(50, y+2, len, 4);
+          else px(49-len, y+2, len, 4);
+        }
+        text(`${(v/100).toFixed(2)} mT`, 86, y+1); 
+      });
+      footer("ENC: TURN PAGE " + String.fromCharCode(183) + " CLICK: MENU");
+    }
+    
+    function drawScan(){
+      header("SCAN", state.page);
+      avatarCard("scan");
+      text(`PT 042/100`, 40, 14);
+      text(`${state.progress}%`, 40, 26, 2);
+      progressBar(40, 44, 84, state.progress);
+      footer("ENC: TURN PAGE " + String.fromCharCode(183) + " CLICK: MENU");
+    }
+    
+    function drawPosition(){
+      header("POSITION", state.page);
+      rect(4, 14, 43, 36); line(25, 16, 25, 47); line(6, 32, 44, 32);
+      const dx=Math.round(Math.sin(state.frame?2.4:1.2)*10), dy=state.frame?5:-4;
+      rect(24+dx, 31+dy, 3, 3, true); rect(21+dx, 28+dy, 9, 9);
+      text("X: +112.4", 55, 15); text("Y: +108.0", 55, 26); text("Z:  +18.0", 55, 37);
+      footer("ENC: TURN PAGE " + String.fromCharCode(183) + " CLICK: MENU");
+    }
+    
+    function drawSystem(){
+      header("SYSTEM", state.page);
+      text("I2C MLX90393 [OK]", 5, 15);
+      text("Host Serial  [OK]", 5, 26);
+      text("VCC: 3.3V", 5, 37);
+      text("TEMP: 32C", 65, 37);
+      progressBar(5, 48, 118, 100);
+      footer("ENC: TURN PAGE " + String.fromCharCode(183) + " CLICK: MENU");
+    }
+    
+    function drawReport(){
+      header("REPORT", state.page);
+      avatarCard("done");
+      text("Peak mT:  18.45", 40, 15);
+      text("Avg mT:    7.20", 40, 25);
+      text("Time:     02:41", 40, 35);
+      text("Points:     100", 40, 45);
+      footer("ENC: TURN PAGE " + String.fromCharCode(183) + " CLICK: MENU");
+    }
+    
+    const renderers=[drawHome,drawField,drawVector,drawScan,drawPosition,drawSystem,drawReport];
+
+    function drawOverlay(){
+      ctx.fillStyle=LCD; ctx.fillRect(16,12,96,43); ctx.fillStyle=PIXEL; rect(16,12,96,43); rect(18,14,92,39);
+      text(pages[state.page],23,17); line(21,26,106,26);
+      const actions=[
+        ["ZERO SENSOR","HOLD VALUE"], ["ZERO SENSOR","SET ALARM"], ["RESET AXIS","CALIBRATE"],
+        ["PAUSE SCAN","STOP SAFE"], ["GO CENTER","SET ZERO"], ["SENSOR TEST","ABOUT"], ["SAVE REPORT","SCAN AGAIN"]
+      ][state.page];
+      text(`> ${actions[0]}`,22,31); text(actions[1],34,43);
+    }
+    
+    function drawBoot(now){
+      const elapsed=now-state.bootAt, p=Math.min(100,Math.round(elapsed/24));
+      clear();
+      avatarCard("idle", 46, 2);
+      text("MAG-SCANNER", 33, 44);
+      progressBar(24, 53, 80, p);
+      if(elapsed>2600){ state.boot=false; state.page=0; syncControls(); }
+    }
+    
+    function render(now=performance.now()){
+      if(state.boot) drawBoot(now);
+      else { clear(); renderers[state.page](); if(state.overlay) drawOverlay(); }
+    }
+    
+    function syncControls(){
+      document.querySelector("#page").value=state.page;
+      document.querySelector("#pageNumber").value=`${state.page+1} / 7`;
+      document.querySelectorAll("[data-state]").forEach(b=>b.classList.toggle("active",b.dataset.state===state.mode));
+      render();
+    }
+    
+    function turn(delta){ state.boot=false; state.overlay=false; state.page=(state.page+delta+pages.length)%pages.length; syncControls(); }
+    document.querySelector("#prev").addEventListener("click",()=>turn(-1));
+    document.querySelector("#next").addEventListener("click",()=>turn(1));
+    document.querySelector("#press").addEventListener("click",()=>{state.boot=false;state.overlay=!state.overlay;render();});
+    document.querySelector("#page").addEventListener("change",e=>{state.boot=false;state.overlay=false;state.page=Number(e.target.value);syncControls();});
+    document.querySelector("#states").addEventListener("click",e=>{if(!e.target.dataset.state)return;state.boot=false;state.mode=e.target.dataset.state;if(state.mode==="scan"||state.mode==="calc")state.page=3;if(state.mode==="done"||state.mode==="error")state.page=6;syncControls();});
+    document.querySelector("#progress").addEventListener("input",e=>{state.progress=Number(e.target.value);document.querySelector("#progressValue").value=`${state.progress}%`;render();});
+    document.querySelector("#fieldStrength").addEventListener("input",e=>{state.field=Number(e.target.value);document.querySelector("#fieldValue").value=`${(state.field/100).toFixed(2)} mT`;render();});
+    document.querySelector("#boot").addEventListener("click",()=>{state.overlay=false;state.boot=true;state.bootAt=performance.now();render();});
+    
+    window.addEventListener("keydown",e=>{
+      if(e.key==="ArrowLeft"){e.preventDefault();turn(-1);} if(e.key==="ArrowRight"){e.preventDefault();turn(1);}
+      if(e.key==="Enter"||e.key===" "){e.preventDefault();state.boot=false;state.overlay=!state.overlay;render();}
+    });
+    
+    setInterval(()=>{ state.frame^=1; render(); },320);
+    (function loop(now){render(now);requestAnimationFrame(loop);})(performance.now());
+  </script>
+</body>
+</html>

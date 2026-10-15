@@ -3,6 +3,9 @@ __pycache__/
 results/
 env/
 .venv/
+.platformio-venv/
+marlin-*/
+.agents/
 scanner_results.db
 scanner_results.db-shm
 scanner_results.db-wal

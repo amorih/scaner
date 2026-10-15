@@ -5,7 +5,7 @@
 #nativeRoot { background: #17121F; }
 
 /* Фиксированная высота нужна frameless-окну: TitleBar в desktop_app.py
-   сам обрабатывает перетаскивание вместо системной рамки Ubuntu. */
+   передаёт перетаскивание системному оконному менеджеру Ubuntu. */
 #titlebar { min-height: 37px; max-height: 37px; background: #1E182A; border-bottom: 1px solid #312943; }
 
 /* #brand — неактивная кнопка с SVG-значком и названием приложения. */

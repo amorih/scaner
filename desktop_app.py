@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Главный запуск desktop-приложения NEXUS Studio.
 
 Здесь нет формул магнитного поля и G-code: модуль связывает готовые модули
@@ -6,15 +7,23 @@
 
 from __future__ import annotations  # Разрешает использовать типы классов до их объявления.
 
+import os
+# Безопасный запуск встроенного Chromium QtWebEngine на Linux / Raspberry Pi:
+# предотвращает сбой контекста GPU (Context lost during MakeCurrent) на чипах Broadcom/Mesa
+if "QTWEBENGINE_CHROMIUM_FLAGS" not in os.environ:
+    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--disable-gpu --no-sandbox"
+
 # json превращает словари Python в безопасные данные для JavaScript и обратно.
 import json
+import math
+import threading
 # sys передаёт Qt аргументы запуска и возвращает код завершения приложения.
 import sys
 # Path формирует абсолютный путь к локальным файлам UI рядом с этим модулем.
 from pathlib import Path
 
 # Базовые объекты Qt: сигналы, поток, таймер, URL и флаги окна.
-from PySide6.QtCore import QObject, QPoint, QSize, QThread, QTimer, QUrl, Signal, Slot, Qt
+from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QSize, QThread, QTimer, QUrl, Signal, Slot, Qt
 # QWebChannel публикует объект Bridge в JavaScript как `bridge`.
 from PySide6.QtWebChannel import QWebChannel
 # Настройки и виджет встроенного Chromium-движка для HTML-интерфейса.
@@ -25,14 +34,16 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QMainWindow, QPushButton, QVBoxLayout, QWidget
 
 # Настройки оборудования, общие для GUI и остальных Python-модулей.
+import config
 from config import (
+    BED_MAX_Z,
     BED_SIZE_X,
     BED_SIZE_Y,
     MOVE_SPEED,
     PRINTER_BAUDRATE,
     PRINTER_PORT,
     PROJECT_NAME,
-    PROJECT_VERSION,
+    RESULTS_FOLDER,
     SCAN_HEIGHT,
     SENSOR_OFFSET_X,
     SENSOR_OFFSET_Y,
@@ -41,10 +52,19 @@ from config import (
 # Экспорт CSV и классы физического оборудования.
 from csv_export import save
 from printer import Printer
-from scanner import ScanCancelled, scan, sensor_to_printer
+from scanner import (
+    ScanCancelled,
+    fast_find_magnet_center,
+    find_magnet_boundaries_from_grid,
+    find_magnet_center,
+    fit_magnet_pattern,
+    scan,
+    sensor_to_printer,
+    validate_parameters,
+)
 from sensor import MagneticSensor
 # SQLite-функции для страницы архива в HTML.
-from storage import get_points, list_scans, save_scan
+from storage import delete_scan, get_points, list_scans, save_scan
 
 
 class HardwareWorker(QObject):
@@ -59,12 +79,19 @@ class HardwareWorker(QObject):
     progress = Signal(int, int, dict)
     scan_finished = Signal(str)
     scan_failed = Signal(str)
+    # Автопоиск центра магнита идёт отдельным набором событий, чтобы не
+    # переопределять обработчики обычного сканирования в HTML.
+    search_progress = Signal(str, int, int, dict)
+    search_finished = Signal(str)
+    search_failed = Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
         self.printer: Printer | None = None
         self.sensor: MagneticSensor | None = None
-        self.cancel_requested = False
+        # Event можно безопасно установить из GUI-потока, даже когда QThread
+        # занят длинным scan(). Обычный queued-slot в этот момент не исполняется.
+        self._cancel_event = threading.Event()
         self.scanning = False
         # До G28 прошивка не знает абсолютную точку отсчёта. Это состояние
         # защищает карту и ручные перемещения от случайного движения.
@@ -90,11 +117,11 @@ class HardwareWorker(QObject):
             self.printer_homed = False
             self.status.emit("printer", True, f"{PRINTER_PORT} · готов")
             self.position.emit(dict(self.current_position))
-            self.log.emit("SUCCESS", "Последовательное соединение с принтером установлено")
+            self.log.emit("SUCCESS", "Последовательное соединение со сканером установлено")
         except Exception as error:
             self.printer_homed = False
             self.status.emit("printer", False, "Не подключён")
-            self.log.emit("ERROR", f"Принтер: {error}")
+            self.log.emit("ERROR", f"Сканер: {error}")
 
     @Slot()
     def connect_sensor(self) -> None:
@@ -112,9 +139,9 @@ class HardwareWorker(QObject):
 
     @Slot()
     def home(self) -> None:
-        """Вызывает G28 только после успешного подключения принтера."""
+        """Вызывает G28 только после успешного подключения сканера."""
         if not self.printer:
-            self.log.emit("WARNING", "Перед поиском дома подключите принтер")
+            self.log.emit("WARNING", "Перед поиском дома подключите сканер")
             return
         try:
             self.log.emit("INFO", "Запущен поиск домашнего положения G28")
@@ -123,34 +150,44 @@ class HardwareWorker(QObject):
             self.current_position = {"x": 0.0, "y": 0.0, "z": 0.0}
             self.position.emit(dict(self.current_position))
             self.status.emit("printer", True, f"{PRINTER_PORT} · откалиброван")
-            self.log.emit("SUCCESS", "Принтер в домашнем положении")
+            self.log.emit("SUCCESS", "Сканер в домашнем положении")
         except Exception as error:
             self.log.emit("ERROR", f"G28: {error}")
 
     @Slot()
     def motors_off(self) -> None:
         """Передаёт M84: снимает удерживающий ток, но не меняет координаты."""
-        if self.printer:
+        if not self.printer:
+            self.log.emit("WARNING", "Перед M84 подключите сканер")
+            return
+        try:
             self.printer.motors_off()
             self.log.emit("INFO", "Двигатели отключены: M84")
+        except Exception as error:
+            self.log.emit("ERROR", f"M84: {error}")
 
     @Slot()
     def motors_on(self) -> None:
         """Передаёт M17: включает удержание осей, но не запускает движение."""
-        if self.printer:
+        if not self.printer:
+            self.log.emit("WARNING", "Перед M17 подключите сканер")
+            return
+        try:
             self.printer.motors_on()
             self.log.emit("INFO", "Двигатели включены: M17")
+        except Exception as error:
+            self.log.emit("ERROR", f"M17: {error}")
 
     @Slot(dict)
     def manual_move(self, target: dict) -> None:
-        """Ручное перемещение принтера в абсолютные координаты из HTML-карты.
+        """Ручное перемещение сканера в абсолютные координаты из HTML-карты.
 
-        Интерфейс передаёт X/Y/Z в системе координат самого принтера, а не
+        Интерфейс передаёт X/Y/Z в системе координат самого сканера, а не
         координаты центра магнита. Это делает карту прямой и понятной:
         клик в рабочей зоне сразу означает точку стола.
         """
         if not self.printer:
-            self.log.emit("WARNING", "Сначала подключите принтер")
+            self.log.emit("WARNING", "Сначала подключите сканер")
             return
         if self.scanning:
             self.log.emit("WARNING", "Во время сканирования ручное перемещение отключено")
@@ -166,14 +203,17 @@ class HardwareWorker(QObject):
             self.log.emit("ERROR", "Неверные координаты ручного перемещения")
             return
 
+        if not all(math.isfinite(value) for value in (x, y, z)):
+            self.log.emit("ERROR", "Координаты должны быть конечными числами")
+            return
         if not 0.0 <= x <= BED_SIZE_X:
             self.log.emit("ERROR", f"X={x:.2f} вне стола 0…{BED_SIZE_X:.0f} мм")
             return
         if not 0.0 <= y <= BED_SIZE_Y:
             self.log.emit("ERROR", f"Y={y:.2f} вне стола 0…{BED_SIZE_Y:.0f} мм")
             return
-        if z < 0.0:
-            self.log.emit("ERROR", "Z не может быть меньше 0 мм")
+        if not 0.0 <= z <= BED_MAX_Z:
+            self.log.emit("ERROR", f"Z={z:.2f} вне диапазона 0…{BED_MAX_Z:.0f} мм")
             return
 
         try:
@@ -188,13 +228,17 @@ class HardwareWorker(QObject):
         except Exception as error:
             self.log.emit("ERROR", f"Перемещение: {error}")
 
-    @Slot()
-    def cancel_scan(self) -> None:
-        """Обычная отмена сканирования без ввода принтера в emergency state."""
-        self.cancel_requested = True
+    def request_cancel(self, *, report=True) -> None:
+        """Потокобезопасно отменяет операцию, не дожидаясь очереди QThread."""
+        self._cancel_event.set()
         if self.printer:
             self.printer.cancel_motion()
-        self.log.emit("WARNING", "Запрошена остановка текущего сканирования")
+        if report:
+            self.log.emit("WARNING", "Запрошена остановка текущего сканирования")
+
+    def prepare_operation(self) -> None:
+        """Сбрасывает отмену перед постановкой новой операции в очередь."""
+        self._cancel_event.clear()
 
     @Slot()
     def calibrate(self) -> None:
@@ -212,6 +256,7 @@ class HardwareWorker(QObject):
     def read_sensor(self) -> None:
         """Делает одно усреднённое измерение для живых чисел интерфейса."""
         if not self.sensor or self.scanning:
+            self.read_done.emit()
             return
         try:
             self.measurement.emit(self.sensor.measure())
@@ -222,7 +267,7 @@ class HardwareWorker(QObject):
 
     @Slot()
     def read_position(self) -> None:
-        """Запрашивает реальные координаты принтера у прошивки через M114."""
+        """Запрашивает реальные координаты сканера у прошивки через M114."""
         if not self.printer or self.scanning:
             self.position_done.emit()
             return
@@ -234,7 +279,7 @@ class HardwareWorker(QObject):
             # оставляем последнее известное положение до следующего опроса.
             pass
         except Exception as error:
-            self.log.emit("ERROR", f"Позиция принтера: {error}")
+            self.log.emit("ERROR", f"Позиция сканера: {error}")
         finally:
             self.position_done.emit()
 
@@ -244,7 +289,12 @@ class HardwareWorker(QObject):
         `Remote I/O error` означает, что Linux не получил ответ от MLX90393.
         Обнуление self.sensor не даёт таймеру 100 мс бесконечно писать ошибки.
         """
-        self.sensor = None
+        failed_sensor, self.sensor = self.sensor, None
+        if failed_sensor:
+            try:
+                failed_sensor.close()
+            except Exception:
+                pass
         self.status.emit("sensor", False, f"Ошибка I²C: {error}")
         self.log.emit("ERROR", f"{operation}: {error}")
 
@@ -253,28 +303,36 @@ class HardwareWorker(QObject):
         # Этот слот выполняется в QThread. Поэтому длительный scan() не
         # замораживает HTML-интерфейс и позволяет отображать прогресс.
         if not self.printer or not self.sensor:
-            self.scan_failed.emit("Перед сканированием подключите принтер и MLX90393")
+            self.scan_failed.emit("Перед сканированием подключите сканер и MLX90393")
+            return
+        try:
+            parameters = validate_parameters(parameters)
+        except (TypeError, ValueError) as error:
+            self.scan_failed.emit(str(error))
             return
         self.scanning = True
-        self.cancel_requested = False
         try:
-            self.log.emit("INFO", "Калибровка датчика и поиск дома принтера")
-            self.sensor.zero()
+            self.log.emit("INFO", "Поиск дома сканера и калибровка датчика")
             self.printer.home()
             self.printer_homed = True
+            # Фон измеряем после homing: датчик находится в известной точке,
+            # а не в случайной позиции над магнитом.
+            self.sensor.zero()
             self.status.emit("printer", True, f"{PRINTER_PORT} · откалиброван")
             results = scan(
                 self.printer, self.sensor, parameters, confirm=False,
                 progress_callback=lambda point, total, value: self.progress.emit(point, total, value),
-                cancelled=lambda: self.cancel_requested,
+                cancelled=self._cancel_event.is_set,
             )
             filename = save(results)
             save_scan(filename, parameters, results)
-            center_x, center_y = sensor_to_printer(0, 0)
+            center_x, center_y = sensor_to_printer(
+                parameters.get("center_x", 0.0), parameters.get("center_y", 0.0)
+            )
             self.current_position = {
                 "x": center_x,
                 "y": center_y,
-                "z": parameters["height"] + SCAN_HEIGHT + 20,
+                "z": min(BED_MAX_Z, parameters["height"] + SCAN_HEIGHT + 20),
             }
             self.position.emit(dict(self.current_position))
             self.scan_finished.emit(filename)
@@ -290,6 +348,83 @@ class HardwareWorker(QObject):
             self.log.emit("ERROR", f"Сканирование: {error}")
         finally:
             self.scanning = False
+            self._cancel_event.clear()
+
+    @Slot(dict)
+    def start_search(self, parameters: dict) -> None:
+        """Тестовая функция: сканер сам ищет центр магнита по максимуму |B|.
+
+        Как и обычный скан, выполняется в QThread. Во время поиска flag
+        self.scanning выключает живой опрос датчика и M114, чтобы они не
+        мешали движению сканера. Найденный центр публикуется событием
+        search_finished в системе координат измерений (0, 0 — центр стола).
+        """
+        if not self.printer or not self.sensor:
+            self.search_failed.emit("Перед поиском центра подключите сканер и MLX90393")
+            return
+        try:
+            height = float(parameters.get("height", 0.0))
+        except (TypeError, ValueError):
+            self.search_failed.emit("Высота поиска должна быть числом")
+            return
+        if not math.isfinite(height):
+            self.search_failed.emit("Высота поиска должна быть конечным числом")
+            return
+        if height < 0 or height + SCAN_HEIGHT > BED_MAX_Z:
+            self.search_failed.emit(
+                f"Рабочая высота должна быть в диапазоне 0…{BED_MAX_Z:.0f} мм"
+            )
+            return
+        pattern = str(parameters.get("pattern", "auto"))
+        fast = bool(parameters.get("fast", True))
+        self.scanning = True
+        try:
+            mode_desc = f"быстрый поиск (5–10 с), паттерн: {pattern}" if fast else f"полный скан колец, паттерн: {pattern}"
+            self.log.emit("INFO", f"Калибровка дома и фона датчика · {mode_desc}")
+            self.printer.home()
+            self.printer_homed = True
+            self.sensor.zero()
+            self.status.emit("printer", True, f"{PRINTER_PORT} · откалиброван")
+            result = find_magnet_center(
+                self.printer, self.sensor, height,
+                progress_callback=lambda stage, point, total, value:
+                    self.search_progress.emit(stage, point, total, value),
+                cancelled=self._cancel_event.is_set,
+                fast=fast,
+                pattern=pattern,
+            )
+            center_printer_x, center_printer_y = sensor_to_printer(
+                result["center_x"], result["center_y"])
+            self.current_position = {
+                "x": center_printer_x,
+                "y": center_printer_y,
+                "z": min(BED_MAX_Z, result["work_z"] + 20),
+            }
+            self.position.emit(dict(self.current_position))
+            self.search_finished.emit(json.dumps(result))
+            shape_str = f", круг Ø{result.get('diameter', 0):.1f} мм" if result.get("pattern") == "circle" else (
+                f", прямоугольник {result.get('width', 0):.1f}×{result.get('length', 0):.1f} мм" if result.get("pattern") == "rectangle" else ""
+            )
+            h_str = f", высота магнита H={result.get('detected_surface_z', 0):.1f} мм (зазор Z={result['work_z']:.1f} мм)" if "detected_surface_z" in result else ""
+            dur_str = f" за {result['duration_sec']:.1f} с" if "duration_sec" in result else ""
+            self.log.emit(
+                "SUCCESS",
+                f"Центр магнита: X{result['center_x']:+.2f} "
+                f"Y{result['center_y']:+.2f} мм{shape_str}{h_str}, |B| над центром "
+                f"{result['peak_b']:.2f} мТл{dur_str}",
+            )
+
+        except ScanCancelled:
+            self.search_failed.emit("Автопоиск центра отменён оператором")
+            self.log.emit("WARNING", "Автопоиск центра отменён")
+        except Exception as error:
+            if isinstance(error, OSError):
+                self._sensor_failed(error, "Автопоиск центра")
+            self.search_failed.emit(str(error))
+            self.log.emit("ERROR", f"Автопоиск центра: {error}")
+        finally:
+            self.scanning = False
+            self._cancel_event.clear()
 
     def emergency_stop_now(self) -> None:
         """Немедленно шлёт M112; восстановление M999 выполняется отдельно.
@@ -299,7 +434,7 @@ class HardwareWorker(QObject):
         Он делает только неблокирующую запись, не читает порт и не отправляет
         другие команды, поэтому не конкурирует с ожидающим `send()`.
         """
-        self.cancel_requested = True
+        self._cancel_event.set()
         self.printer_homed = False
         self.awaiting_emergency_recovery = True
         if self.printer:
@@ -322,9 +457,25 @@ class HardwareWorker(QObject):
             self.printer.recover_after_stop()
             self.awaiting_emergency_recovery = False
             self.status.emit("printer", True, f"{PRINTER_PORT} · требуется G28")
-            self.log.emit("SUCCESS", "Принтер восстановлен после M112; выполните G28")
+            self.log.emit("SUCCESS", "Сканер восстановлен после M112; выполните G28")
         except Exception as error:
             self.log.emit("ERROR", f"Восстановление после M112: {error}")
+
+    @Slot()
+    def shutdown(self) -> None:
+        """Закрывает serial и I²C при штатном выходе из приложения."""
+        if self.printer:
+            try:
+                self.printer.close()
+            except OSError:
+                pass
+            self.printer = None
+        if self.sensor:
+            try:
+                self.sensor.close()
+            except OSError:
+                pass
+            self.sensor = None
 
 
 class Bridge(QObject):
@@ -333,6 +484,19 @@ class Bridge(QObject):
     def __init__(self, window: "StudioWindow") -> None:
         super().__init__()
         self.window = window
+
+    def _parse_json_object(self, payload: str, action: str) -> dict | None:
+        """Разбирает JSON-объект или показывает понятную ошибку в консоли."""
+        try:
+            value = json.loads(payload)
+            if not isinstance(value, dict):
+                raise ValueError("ожидался JSON-объект")
+            return value
+        except (TypeError, ValueError) as error:
+            self.window.push(
+                "log", {"level": "ERROR", "message": f"Invalid {action} request: {error}"}
+            )
+            return None
 
     # Имена слотов camelCase совпадают с вызовами JavaScript в studio.html.
     # Однострочные методы ниже не делают работу сами: они только передают
@@ -350,13 +514,9 @@ class Bridge(QObject):
     @Slot(str)
     def moveAxes(self, payload: str) -> None:
         """Получает JSON координат и запускает ручное перемещение принтера."""
-        try:
-            coordinates = json.loads(payload)
+        coordinates = self._parse_json_object(payload, "move")
+        if coordinates is not None:
             self.window.move_requested.emit(coordinates)
-        except (TypeError, ValueError) as error:
-            # Некорректный JSON нельзя отправлять в worker: это была бы
-            # потенциально опасная команда движения с неполными координатами.
-            self.window.push("log", {"level": "ERROR", "message": f"Invalid move request: {error}"})
     @Slot()
     def calibrate(self) -> None: self.window.calibrate_requested.emit()
     @Slot()
@@ -367,12 +527,34 @@ class Bridge(QObject):
     @Slot(str)
     def startScan(self, payload: str) -> None:
         """Получает JSON параметров из HTML и отправляет словарь в worker-поток."""
+        parameters = self._parse_json_object(payload, "scan")
+        if parameters is not None:
+            self.window.start_scan(parameters)
+
+    @Slot(str)
+    def startSearch(self, payload: str) -> None:
+        """Получает JSON параметров автопоиска и запускает его в worker-потоке."""
+        parameters = self._parse_json_object(payload, "search")
+        if parameters is not None:
+            self.window.start_search(parameters)
+
+    @Slot(float, float)
+    def moveToCenter(self, center_x: float, center_y: float) -> None:
+        """Перемещает сопло и датчик над найденным центром магнита."""
+        printer_x, printer_y = sensor_to_printer(center_x, center_y)
+        self.window.move_requested.emit({"x": printer_x, "y": printer_y, "z": 25.0})
+
+    @Slot(str, str, result=str)
+    def analyzeGrid(self, payload: str, pattern: str) -> str:
+        """Мгновенно определяет границы и форму магнита по переданной сетке точек."""
         try:
-            parameters = json.loads(payload)
-            self.window.scan_requested.emit(parameters)
-        except (TypeError, ValueError) as error:
-            # Ошибка парсинга показывается в консоли HTML вместо падения GUI.
-            self.window.push("log", {"level": "ERROR", "message": f"Invalid scan request: {error}"})
+            pts_data = json.loads(payload)
+            points = [(float(p["x"]), float(p["y"])) for p in pts_data]
+            values = [float(p["b"]) for p in pts_data]
+            res = find_magnet_boundaries_from_grid(points, values, pattern=pattern)
+            return json.dumps(res)
+        except Exception as error:
+            return json.dumps({"error": str(error)})
 
     @Slot(result=str)
     def archive(self) -> str:
@@ -383,6 +565,39 @@ class Bridge(QObject):
     def points(self, scan_id: int) -> str:
         """Возвращает JS строку JSON с точками одного выбранного скана."""
         return json.dumps([dict(item) for item in get_points(scan_id)])
+
+    @Slot(int, result=str)
+    def deleteScan(self, scan_id: int) -> str:
+        """Удаляет скан и его точки; CSV убирается только из папки results.
+
+        Удаление идёт синхронно: SQLite-запись маленькая, а HTML просто
+        перечитает список. Возврат JSON сообщает интерфейсу, что файл тоже
+        был зачищен, чтобы список не показывал «пустые» удалённые файлы.
+        """
+        filename = delete_scan(scan_id)
+        if filename is None:
+            return json.dumps({"ok": False, "message": "Скан не найден"})
+        # CSV удаляем только если он действительно лежит в папке результатов.
+        # Проверка родительской папки защищает от запроса на удаление
+        # произвольного файла, присланного из JavaScript.
+        removed_file = False
+        project_root = Path(__file__).resolve().parent
+        results_root = (project_root / RESULTS_FOLDER).resolve()
+        candidate = Path(filename)
+        if not candidate.is_absolute():
+            candidate = project_root / candidate
+        candidate = candidate.resolve()
+        try:
+            candidate.relative_to(results_root)
+        except ValueError:
+            pass
+        else:
+            try:
+                removed_file = candidate.is_file()
+                candidate.unlink(missing_ok=True)
+            except OSError:
+                removed_file = False
+        return json.dumps({"ok": True, "removed_file": removed_file})
 
     @Slot(result=str)
     def configuration(self) -> str:
@@ -397,6 +612,16 @@ class Bridge(QObject):
             "sensor_offset_x": SENSOR_OFFSET_X,
             "sensor_offset_y": SENSOR_OFFSET_Y,
         })
+
+    @Slot(result=str)
+    def getSettings(self) -> str:
+        """Возвращает текущие настройки оборудования и скорости сканера."""
+        return json.dumps(self.window.get_current_settings())
+
+    @Slot(str, result=str)
+    def saveSettings(self, payload: str) -> str:
+        """Сохраняет и динамически применяет настройки сканера."""
+        return json.dumps(self.window.apply_settings(payload))
 
 
 class TitleBar(QFrame):
@@ -427,8 +652,15 @@ class TitleBar(QFrame):
             row.addWidget(button)
 
     def mousePressEvent(self, event) -> None:
-        # Frameless-окно не имеет системной шапки, поэтому перемещаем его сами.
+        # startSystemMove передаёт перетаскивание оконному менеджеру Ubuntu.
+        # Поэтому работают прилипание к краям, разворачивание и рабочие
+        # пространства — как у обычных нативных программ.
         if event.button() == Qt.MouseButton.LeftButton:
+            handle = self.window.windowHandle()
+            if handle and handle.startSystemMove():
+                event.accept()
+                return
+            # Редкий запасной путь для окружений без system move.
             self.drag_origin = event.globalPosition().toPoint() - self.window.frameGeometry().topLeft()
 
     def mouseMoveEvent(self, event) -> None:
@@ -437,6 +669,12 @@ class TitleBar(QFrame):
 
     def mouseReleaseEvent(self, event) -> None:
         self.drag_origin = None
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        """Двойной клик по пустой части шапки разворачивает окно, как в Ubuntu."""
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.window.toggle_maximize()
+            event.accept()
 
 
 class StudioWindow(QMainWindow):
@@ -450,21 +688,34 @@ class StudioWindow(QMainWindow):
     motors_on_requested = Signal()
     move_requested = Signal(dict)
     calibrate_requested = Signal()
-    cancel_scan_requested = Signal()
     recover_requested = Signal()
+    shutdown_requested = Signal()
     read_requested = Signal()
     position_requested = Signal()
     scan_requested = Signal(dict)
+    search_requested = Signal(dict)
+    # Толщина зоны захвата за границей контента. Семь пикселей достаточно для
+    # удобного изменения размера, но курсор не цепляет элементы интерфейса.
+    RESIZE_MARGIN = 7
 
     def __init__(self) -> None:
         super().__init__()
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
-        self.setMinimumSize(1060, 680)
+        # Интерфейс умеет перестраиваться в узкий режим CSS-медиазапросами,
+        # поэтому окно можно сужать заметно сильнее прежних 1060 px.
+        self.setMinimumSize(860, 560)
         self.resize(1540, 930)
         # Защита от очереди из сотен запросов: пока датчик отвечает, новый
         # запрос от таймера 100 мс не создаётся.
         self.measurement_pending = False
         self.position_pending = False
+        self._connected = {"printer": False, "sensor": False}
+        self._operation_active = False
+        # Состояние ручного resize используется только как запасной вариант,
+        # если оконный менеджер не поддерживает QWindow.startSystemResize().
+        self._resize_edges = Qt.Edge(0)
+        self._resize_origin: QPoint | None = None
+        self._resize_geometry: QRect | None = None
         self._build_worker()
         root = QWidget(objectName="nativeRoot")
         layout = QVBoxLayout(root)
@@ -482,6 +733,10 @@ class StudioWindow(QMainWindow):
         self.web.setUrl(QUrl.fromLocalFile(str(Path(__file__).parent / "ui" / "studio.html")))
         layout.addWidget(self.web, 1)
         self.setCentralWidget(root)
+        # Frameless-окно не получает события мыши от вложенного WebEngine.
+        # Фильтр видит их до Chromium и обрабатывает только узкую кромку окна.
+        root.installEventFilter(self)
+        self.web.installEventFilter(self)
         # Два отдельных таймера легче настраивать и проще контролировать:
         # датчик читаем немного чаще, координаты принтера — заметно реже.
         self.live_timer = QTimer(self)
@@ -513,11 +768,12 @@ class StudioWindow(QMainWindow):
         self.motors_on_requested.connect(self.worker.motors_on)
         self.move_requested.connect(self.worker.manual_move)
         self.calibrate_requested.connect(self.worker.calibrate)
-        self.cancel_scan_requested.connect(self.worker.cancel_scan)
         self.recover_requested.connect(self.worker.recover_after_emergency_stop)
+        self.shutdown_requested.connect(self.worker.shutdown)
         self.read_requested.connect(self.worker.read_sensor)
         self.position_requested.connect(self.worker.read_position)
         self.scan_requested.connect(self.worker.start_scan)
+        self.search_requested.connect(self.worker.start_search)
         self.worker.log.connect(self._handle_log)
         self.worker.status.connect(self._handle_status)
         self.worker.measurement.connect(self._measurement)
@@ -527,6 +783,9 @@ class StudioWindow(QMainWindow):
         self.worker.progress.connect(self._progress)
         self.worker.scan_finished.connect(self._scan_finished)
         self.worker.scan_failed.connect(self._scan_failed)
+        self.worker.search_progress.connect(self._search_progress)
+        self.worker.search_finished.connect(self._search_finished)
+        self.worker.search_failed.connect(self._search_failed)
         self.thread.start()
 
     def push(self, event: str, payload: dict) -> None:
@@ -542,13 +801,13 @@ class StudioWindow(QMainWindow):
     def _poll_live_data(self) -> None:
         """Периодически обновляет датчик и координаты принтера без блокировки UI."""
         # Не ставим новое чтение, пока не завершилось предыдущее измерение.
-        if self.worker.sensor and not self.worker.scanning and not self.measurement_pending:
+        if self._connected["sensor"] and not self._operation_active and not self.measurement_pending:
             self.measurement_pending = True
             self.read_requested.emit()
 
     def _poll_position(self) -> None:
         """Опрос текущей позиции принтера отдельным редким таймером."""
-        if self.worker.printer and not self.worker.scanning and not self.position_pending:
+        if self._connected["printer"] and not self._operation_active and not self.position_pending:
             self.position_pending = True
             self.position_requested.emit()
 
@@ -577,21 +836,43 @@ class StudioWindow(QMainWindow):
 
     @Slot(str, bool, str)
     def _handle_status(self, device: str, connected: bool, text: str) -> None:
+        if device in self._connected:
+            self._connected[device] = connected
         self.push("status", {"device": device, "connected": connected, "text": text})
 
     @Slot(str)
     def _scan_finished(self, filename: str) -> None:
+        self._operation_active = False
         self.push("scanFinished", {"filename": filename})
         self.recover_requested.emit()
 
     @Slot(str)
     def _scan_failed(self, message: str) -> None:
+        self._operation_active = False
         self.push("scanFailed", {"message": message})
         self.recover_requested.emit()
 
     def _progress(self, point: int, total: int, value: dict) -> None:
         """Передаёт HTML номер точки, общее число точек и последнее значение."""
         self.push("progress", {"point": point, "total": total, "value": value})
+
+    def _search_progress(self, stage: str, point: int, total: int, value: dict) -> None:
+        """Передаёт HTML этап автопоиска, номер точки и последнее значение."""
+        self.push("searchProgress", {
+            "stage": stage, "point": point, "total": total, "value": value,
+        })
+
+    def _search_finished(self, payload: str) -> None:
+        """Показывает в HTML найденный центр магнита и возвращает worker в строй."""
+        self._operation_active = False
+        self.push("searchFinished", json.loads(payload))
+        self.recover_requested.emit()
+
+    def _search_failed(self, message: str) -> None:
+        """Сообщает HTML об ошибке или отмене автопоиска."""
+        self._operation_active = False
+        self.push("searchFailed", {"message": message})
+        self.recover_requested.emit()
 
     def emergency_stop(self) -> None:
         """Точка входа M112, вызываемая кнопкой HTML через Bridge."""
@@ -601,8 +882,77 @@ class StudioWindow(QMainWindow):
         QTimer.singleShot(650, self.recover_requested.emit)
 
     def cancel_scan(self) -> None:
-        """Останавливает текущее сканирование без аварийной блокировки принтера."""
-        self.cancel_scan_requested.emit()
+        """Останавливает текущее сканирование без аварийной блокировки сканера."""
+        self.worker.request_cancel()
+
+    def get_current_settings(self) -> dict:
+        """Возвращает словарь текущих настроек оборудования и динамики."""
+        return {
+            "scan_speed": int(getattr(config, "SCAN_SPEED", 6000)),
+            "move_speed": int(getattr(config, "MOVE_SPEED", 8000)),
+            "z_speed": int(getattr(config, "Z_SPEED", 1500)),
+            "settle_time": float(getattr(config, "POINT_SETTLE_TIME", 0.10)),
+            "samples_per_point": int(getattr(config, "SAMPLES_PER_POINT", 1)),
+            "scan_height": float(getattr(config, "SCAN_HEIGHT", 5.0)),
+            "sensor_timeout": float(getattr(config, "SENSOR_RECONNECT_TIMEOUT", 5.0)),
+            "printer_port": str(getattr(config, "PRINTER_PORT", "/dev/ttyUSB0")),
+            "baudrate": int(getattr(config, "PRINTER_BAUDRATE", 115200)),
+            "i2c_bus": int(getattr(config, "I2C_BUS", 1)),
+            "sensor_address": hex(getattr(config, "MLX90393_ADDRESS", 0x0C)),
+        }
+
+    def apply_settings(self, payload: str) -> dict:
+        """Применяет пользовательские настройки к config.py в рантайме."""
+        try:
+            data = json.loads(payload) if isinstance(payload, str) else payload
+            if "scan_speed" in data:
+                config.SCAN_SPEED = max(500, min(15000, int(data["scan_speed"])))
+            if "move_speed" in data:
+                config.MOVE_SPEED = max(1000, min(15000, int(data["move_speed"])))
+            if "z_speed" in data:
+                config.Z_SPEED = max(200, min(5000, int(data["z_speed"])))
+            if "settle_time" in data:
+                config.POINT_SETTLE_TIME = max(0.005, min(2.0, float(data["settle_time"])))
+            if "samples_per_point" in data:
+                config.SAMPLES_PER_POINT = max(1, min(20, int(data["samples_per_point"])))
+            if "scan_height" in data:
+                config.SCAN_HEIGHT = max(0.5, min(50.0, float(data["scan_height"])))
+            if "sensor_timeout" in data:
+                config.SENSOR_RECONNECT_TIMEOUT = max(0.5, min(30.0, float(data["sensor_timeout"])))
+
+            self.push("log", {"level": "SUCCESS", "message": f"Настройки сканера сохранены: скорость {config.SCAN_SPEED} мм/мин, стабилизация {config.POINT_SETTLE_TIME:.2f} с"})
+            return {"ok": True, "settings": self.get_current_settings()}
+        except Exception as error:
+            self.push("log", {"level": "ERROR", "message": f"Ошибка сохранения настроек: {error}"})
+            return {"ok": False, "error": str(error)}
+
+    def start_scan(self, parameters: dict) -> None:
+        """Приостанавливает фоновые опросы и запускает площадной скан."""
+        if self._operation_active:
+            self.push("log", {"level": "WARNING", "message": "Операция уже выполняется"})
+            return
+        parameters.setdefault("scan_speed", getattr(config, "SCAN_SPEED", 6000))
+        parameters.setdefault("move_speed", getattr(config, "MOVE_SPEED", 8000))
+        parameters.setdefault("z_speed", getattr(config, "Z_SPEED", 1500))
+        parameters.setdefault("settle_time", getattr(config, "POINT_SETTLE_TIME", 0.10))
+        parameters.setdefault("samples_per_point", getattr(config, "SAMPLES_PER_POINT", 1))
+        parameters.setdefault("scan_height", getattr(config, "SCAN_HEIGHT", 5.0))
+        self.worker.prepare_operation()
+        self._operation_active = True
+        self.measurement_pending = False
+        self.position_pending = False
+        self.scan_requested.emit(parameters)
+
+    def start_search(self, parameters: dict) -> None:
+        """Приостанавливает фоновые опросы и запускает поиск центра."""
+        if self._operation_active:
+            self.push("log", {"level": "WARNING", "message": "Операция уже выполняется"})
+            return
+        self.worker.prepare_operation()
+        self._operation_active = True
+        self.measurement_pending = False
+        self.position_pending = False
+        self.search_requested.emit(parameters)
 
     def open_settings(self) -> None:
         self.push("navigate", {"page": "settings"})
@@ -610,8 +960,95 @@ class StudioWindow(QMainWindow):
     def toggle_maximize(self) -> None:
         self.showNormal() if self.isMaximized() else self.showMaximized()
 
+    def _resize_edges_at(self, global_position: QPoint) -> Qt.Edge:
+        """Определяет край или угол окна под курсором в глобальных координатах."""
+        if self.isMaximized():
+            return Qt.Edge(0)
+        frame = self.frameGeometry()
+        margin = self.RESIZE_MARGIN
+        edges = Qt.Edge(0)
+        if global_position.x() <= frame.left() + margin:
+            edges |= Qt.Edge.LeftEdge
+        elif global_position.x() >= frame.right() - margin:
+            edges |= Qt.Edge.RightEdge
+        if global_position.y() <= frame.top() + margin:
+            edges |= Qt.Edge.TopEdge
+        elif global_position.y() >= frame.bottom() - margin:
+            edges |= Qt.Edge.BottomEdge
+        return edges
+
+    @staticmethod
+    def _resize_cursor(edges: Qt.Edge) -> Qt.CursorShape:
+        """Возвращает привычную форму курсора для конкретного края или угла."""
+        left_right = Qt.Edge.LeftEdge | Qt.Edge.RightEdge
+        top_bottom = Qt.Edge.TopEdge | Qt.Edge.BottomEdge
+        if edges in (Qt.Edge.LeftEdge, Qt.Edge.RightEdge):
+            return Qt.CursorShape.SizeHorCursor
+        if edges in (Qt.Edge.TopEdge, Qt.Edge.BottomEdge):
+            return Qt.CursorShape.SizeVerCursor
+        if edges in (Qt.Edge.TopEdge | Qt.Edge.LeftEdge, Qt.Edge.BottomEdge | Qt.Edge.RightEdge):
+            return Qt.CursorShape.SizeFDiagCursor
+        if edges in (Qt.Edge.TopEdge | Qt.Edge.RightEdge, Qt.Edge.BottomEdge | Qt.Edge.LeftEdge):
+            return Qt.CursorShape.SizeBDiagCursor
+        return Qt.CursorShape.ArrowCursor
+
+    def _resize_manually(self, global_position: QPoint) -> None:
+        """Меняет QRect только когда compositor не предоставил system resize."""
+        if not self._resize_geometry or not self._resize_origin:
+            return
+        delta = global_position - self._resize_origin
+        geometry = QRect(self._resize_geometry)
+        minimum_width = self.minimumWidth()
+        minimum_height = self.minimumHeight()
+        if self._resize_edges & Qt.Edge.LeftEdge:
+            geometry.setLeft(min(geometry.right() - minimum_width + 1, geometry.left() + delta.x()))
+        if self._resize_edges & Qt.Edge.RightEdge:
+            geometry.setRight(max(geometry.left() + minimum_width - 1, geometry.right() + delta.x()))
+        if self._resize_edges & Qt.Edge.TopEdge:
+            geometry.setTop(min(geometry.bottom() - minimum_height + 1, geometry.top() + delta.y()))
+        if self._resize_edges & Qt.Edge.BottomEdge:
+            geometry.setBottom(max(geometry.top() + minimum_height - 1, geometry.bottom() + delta.y()))
+        self.setGeometry(geometry)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        """Даёт resize всем краям поверх Qt-контента и встроенного Chromium."""
+        if watched not in (self.centralWidget(), self.web):
+            return super().eventFilter(watched, event)
+        if event.type() == QEvent.Type.MouseMove:
+            mouse = event  # QMouseEvent; Qt передаёт globalPosition().
+            global_position = mouse.globalPosition().toPoint()
+            if self._resize_edges and mouse.buttons() & Qt.MouseButton.LeftButton:
+                self._resize_manually(global_position)
+                return True
+            edges = self._resize_edges_at(global_position)
+            self.setCursor(self._resize_cursor(edges))
+        elif event.type() == QEvent.Type.MouseButtonPress:
+            mouse = event
+            if mouse.button() == Qt.MouseButton.LeftButton:
+                edges = self._resize_edges_at(mouse.globalPosition().toPoint())
+                if edges:
+                    handle = self.windowHandle()
+                    if handle and handle.startSystemResize(edges):
+                        return True
+                    self._resize_edges = edges
+                    self._resize_origin = mouse.globalPosition().toPoint()
+                    self._resize_geometry = self.geometry()
+                    return True
+        elif event.type() == QEvent.Type.MouseButtonRelease:
+            if self._resize_edges:
+                self._resize_edges = Qt.Edge(0)
+                self._resize_origin = None
+                self._resize_geometry = None
+                return True
+        return super().eventFilter(watched, event)
+
     def closeEvent(self, event) -> None:
-        """При закрытии просто завершает поток, не оставляя M112 после выхода."""
+        """Останавливает опросы и освобождает serial/I²C перед выходом."""
+        self.live_timer.stop()
+        self.position_timer.stop()
+        if self._operation_active:
+            self.worker.request_cancel(report=False)
+        self.shutdown_requested.emit()
         self.thread.quit()
         self.thread.wait(1200)
         event.accept()

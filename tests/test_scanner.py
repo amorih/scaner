@@ -3,7 +3,7 @@
 import math  # Проверяет расстояния точек от центра окружности.
 import unittest  # Запускает тесты штатной библиотекой Python.
 
-from scanner import create_axis, create_circle_scan, create_line_scan, create_scan, sensor_to_printer  # Тестируем чистую геометрию без USB/I²C.
+from scanner import create_axis, create_circle_scan, create_line_scan, create_scan, sensor_to_printer, validate_parameters  # Тестируем чистую геометрию без USB/I²C.
 
 
 class ScannerGeometryTests(unittest.TestCase):
@@ -47,6 +47,36 @@ class ScannerGeometryTests(unittest.TestCase):
         printer_x, printer_y = sensor_to_printer(0, 0)
         self.assertGreaterEqual(printer_x, 0)
         self.assertGreaterEqual(printer_y, 0)
+
+    def test_validation_rejects_dangerous_or_incomplete_scan_parameters(self):
+        """Backend не принимает нулевой шаг и вырожденную линию из DevTools."""
+        with self.assertRaisesRegex(ValueError, "Шаг"):
+            validate_parameters({
+                "shape": "rectangle", "mode": "snake", "size_x": 20,
+                "size_y": 20, "height": 5, "step": 0,
+            })
+        with self.assertRaisesRegex(ValueError, "Начало и конец"):
+            validate_parameters({
+                "shape": "system", "mode": "line", "size_x": 0,
+                "size_y": 0, "height": 5, "step": 1,
+                "start_x": 0, "start_y": 0, "end_x": 0, "end_y": 0,
+            })
+
+    def test_validation_normalizes_numeric_json_values(self):
+        """Числа из JSON-формы не остаются строками в геометрии сканера."""
+        parameters = validate_parameters({
+            "shape": "rectangle", "mode": "snake", "size_x": "20",
+            "size_y": "10", "height": "5", "step": "2.5",
+        })
+        self.assertEqual(parameters["size_x"], 20.0)
+        self.assertEqual(parameters["step"], 2.5)
+
+    def test_validation_rejects_work_height_above_machine_limit(self):
+        with self.assertRaisesRegex(ValueError, "Рабочая высота"):
+            validate_parameters({
+                "shape": "rectangle", "mode": "snake", "size_x": 20,
+                "size_y": 20, "height": 246, "step": 2,
+            })
 
 
 if __name__ == "__main__":
